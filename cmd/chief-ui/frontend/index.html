@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Chief</title>
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-glyph">♦</span>
+      <span class="brand-name">Chief</span>
+    </div>
+    <div class="toolbar">
+      <button id="btn-refresh" title="Refresh (⌘R)">Refresh</button>
+      <button id="btn-add" title="Register a project directory">+ Add project</button>
+    </div>
+    <div class="status" id="status">chiefd: checking…</div>
+  </header>
+
+  <main class="body">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">Projects</div>
+      <ul id="project-list" class="project-list"></ul>
+    </aside>
+
+    <section class="content" id="content">
+      <div class="pane-header">
+        <h1 id="pane-title">All backlogs</h1>
+        <div class="filters">
+          <button id="btn-add-task" class="hidden" title="Append a new task to this project's backlog.md">+ Add task</button>
+          <label>Status:</label>
+          <select id="status-filter">
+            <option value="">all</option>
+            <option value="pending" selected>pending</option>
+            <option value="active">active</option>
+            <option value="blocked">blocked</option>
+            <option value="deferred">deferred</option>
+            <option value="done">done</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="backlog-wrap">
+        <table class="backlog">
+          <thead>
+            <tr>
+              <th class="col-status">S</th>
+              <th class="col-id">ID</th>
+              <th class="col-prio">Prio</th>
+              <th class="col-project">Project</th>
+              <th class="col-category">Category</th>
+              <th class="col-title">Title</th>
+            </tr>
+          </thead>
+          <tbody id="backlog-body">
+            <tr><td colspan="6" class="empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="project-meta hidden" id="project-meta">
+        <h2>Project</h2>
+        <dl>
+          <dt>Path</dt><dd id="pm-path"></dd>
+          <dt>State</dt><dd id="pm-state"></dd>
+          <dt>Mode</dt><dd id="pm-mode"></dd>
+          <dt>Created</dt><dd id="pm-created"></dd>
+        </dl>
+        <div class="doc-block">
+          <h3>Constitution</h3>
+          <pre id="pm-constitution" class="doc-preview">—</pre>
+        </div>
+        <div class="doc-block">
+          <h3>PROJECT.md</h3>
+          <pre id="pm-project-doc" class="doc-preview">—</pre>
+        </div>
+        <div class="doc-block">
+          <div class="sessions-header">
+            <h3>Claude sessions</h3>
+            <div class="sessions-actions">
+              <button id="btn-open-trace" title="Open in Claude Session Analyzer">Open in Analyzer</button>
+              <button id="btn-open-sessions-dir" title="Reveal sessions dir in Finder">Reveal dir</button>
+            </div>
+          </div>
+          <div id="pm-sessions-hint" class="sessions-hint hidden"></div>
+          <table id="pm-sessions" class="sessions-table">
+            <thead>
+              <tr>
+                <th>Session</th>
+                <th class="col-size">Size</th>
+                <th class="col-mtime">Modified</th>
+                <th class="col-act"></th>
+              </tr>
+            </thead>
+            <tbody id="pm-sessions-body">
+              <tr><td colspan="4" class="empty">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <aside class="detail hidden" id="detail">
+      <div class="detail-header">
+        <h2 id="detail-title">Task</h2>
+        <button id="detail-close" title="Close">×</button>
+      </div>
+      <div class="detail-body" id="detail-body"></div>
+      <div class="detail-actions">
+        <button id="btn-send-cmux" title="Inject a prompt into this project's cmux Claude">Send to cmux Claude</button>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Modal: add-task -->
+  <div id="modal-add" class="modal hidden">
+    <div class="modal-card">
+      <h2>Add task</h2>
+      <div class="modal-row"><label>Title</label><input id="add-title" type="text" placeholder="Short task title"/></div>
+      <div class="modal-row"><label>Category</label><input id="add-category" type="text" placeholder="(section header; empty = Backlog)"/></div>
+      <div class="modal-row"><label>Priority</label><input id="add-priority" type="number" value="0" min="-9" max="9"/></div>
+      <div class="modal-row"><label>Body</label><textarea id="add-body" rows="4" placeholder="Optional detail (indented sub-bullets in backlog.md)"></textarea></div>
+      <div class="modal-actions">
+        <button id="btn-add-cancel">Cancel</button>
+        <button id="btn-add-save" class="primary">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: analyzer install progress -->
+  <div id="modal-install" class="modal hidden">
+    <div class="modal-card wide">
+      <h2 id="install-title">Install Claude Session Analyzer</h2>
+      <p class="modal-hint" id="install-hint">This clones the repo to <code>~/Library/Caches/Chief/</code> and builds <code>ct</code> (~5s) + the <code>.app</code> (~30s first time).</p>
+      <div class="install-status" id="install-status">
+        <span class="spinner"></span>
+        <span id="install-status-text">Waiting…</span>
+      </div>
+      <pre id="install-log" class="install-log">(log will appear here)</pre>
+      <div class="modal-actions">
+        <button id="btn-install-start" class="primary">Start install</button>
+        <button id="btn-install-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: cmux surface picker -->
+  <div id="modal-cmux" class="modal hidden">
+    <div class="modal-card wide">
+      <h2>Pick cmux surface</h2>
+      <p class="modal-hint">Chief will inject the task's prompt into the selected pane. The choice is saved per project.</p>
+      <div class="modal-section" id="cmux-matches-block">
+        <h3>Matches by cwd</h3>
+        <ul id="cmux-matches" class="surface-list"></ul>
+      </div>
+      <div class="modal-section">
+        <h3>All cmux surfaces</h3>
+        <ul id="cmux-all" class="surface-list"></ul>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-cmux-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="./src/main.js" type="module"></script>
+</body>
+</html>

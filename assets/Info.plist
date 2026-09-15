@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Chief Menu</string>
+    <key>CFBundleDisplayName</key>
+    <string>Chief Menu</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.chris.chief-menu</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundleVersion</key>
+    <string>0.1</string>
+    <key>CFBundleExecutable</key>
+    <string>chief-menu</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <!-- LSUIElement makes this a menu-bar-only app: no Dock icon,
+         no app switcher entry, doesn't steal focus. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

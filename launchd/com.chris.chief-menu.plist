@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chris.chief-menu</string>
+
+    <!-- Launch the .app bundle so LSUIElement takes effect and no Dock icon appears. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/chris/Applications/Chief-Menu.app/Contents/MacOS/chief-menu</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Only run when the user is actually logged into a GUI session. -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/chris/Library/Logs/Chief/chief-menu.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/chris/Library/Logs/Chief/chief-menu.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

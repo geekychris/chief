@@ -1,0 +1,6 @@
+id: proj_e9fa98ad
+name: chief
+spawn_mode: attach
+cmux:
+    workspace_id: ""
+    surface_id: surface:51

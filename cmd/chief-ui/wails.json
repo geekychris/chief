@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Chief",
+  "outputfilename": "Chief",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Chris J Collins",
+    "email": "chris@hitorro.com"
+  },
+  "info": {
+    "companyName": "chris.local",
+    "productName": "Chief",
+    "productVersion": "0.1.0",
+    "comments": "Multi-project Claude Code orchestrator"
+  }
+}

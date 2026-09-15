@@ -1,0 +1,394 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+
+	"github.com/geekychris/chief/internal/claudetrace"
+	"github.com/geekychris/chief/internal/ipc"
+	"github.com/geekychris/chief/internal/methods"
+)
+
+// execOpen shells the macOS `open` command. Small wrapper so all UI-level
+// launches share error handling.
+func execOpen(args ...string) error {
+	return exec.Command("open", args...).Start()
+}
+
+// analyzerStatus is a Wails-side probe (independent of chiefd's answer) so
+// the Open button can decide instantly.
+func analyzerStatus() (bool, string) { return claudetrace.AnalyzerInstalled() }
+
+// App holds the Wails context. All exported methods are surfaced as JS
+// bindings under `window.go.main.App.<method>`.
+type App struct {
+	ctx context.Context
+}
+
+// NewApp constructs the backend struct. Called once by main().
+func NewApp() *App { return &App{} }
+
+func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+
+// ---------- exposed bindings ----------
+//
+// Every backend method here is proxied through chiefd; we never touch SQLite
+// directly. Fresh short-lived connections per call so a chiefd bounce doesn't
+// break the UI.
+
+// Ping returns chiefd's health snapshot ({pong, version, pid, time}) or an
+// error string.
+func (a *App) Ping() (map[string]any, error) {
+	c, err := a.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	var raw json.RawMessage
+	if err := c.Call("ping", nil, &raw); err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	return out, nil
+}
+
+// ListProjects returns per-project summaries with counts.
+func (a *App) ListProjects() ([]methods.ProjectSummary, error) {
+	c, err := a.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	var resp methods.ProjectListResponse
+	if err := c.Call("project.list", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Projects, nil
+}
+
+// ListBacklog returns tasks; empty projectID = all projects, empty status = all statuses.
+func (a *App) ListBacklog(projectID, status string) ([]methods.BacklogRow, error) {
+	c, err := a.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	var resp methods.BacklogListResponse
+	req := methods.BacklogListRequest{ProjectID: projectID, Status: status}
+	if err := c.Call("backlog.list", req, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tasks, nil
+}
+
+// GetTask returns a single task with its project name.
+func (a *App) GetTask(id string) (methods.TaskShowResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.TaskShowResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.TaskShowResponse
+	if err := c.Call("task.show", methods.TaskShowRequest{ID: id}, &resp); err != nil {
+		return methods.TaskShowResponse{}, err
+	}
+	return resp, nil
+}
+
+// AddProject registers a new project directory (absolute path).
+func (a *App) AddProject(path, name, spawnMode string) (methods.ProjectAddResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.ProjectAddResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.ProjectAddResponse
+	req := methods.ProjectAddRequest{Path: path, Name: name, SpawnMode: spawnMode}
+	if err := c.Call("project.add", req, &resp); err != nil {
+		return methods.ProjectAddResponse{}, err
+	}
+	return resp, nil
+}
+
+// RemoveProject removes a project by id, name, or path. Files are left alone.
+func (a *App) RemoveProject(idOrPath string) error {
+	c, err := a.dial()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	var resp methods.ProjectRemoveResponse
+	return c.Call("project.remove", methods.ProjectRemoveRequest{IDOrPath: idOrPath}, &resp)
+}
+
+// RescanProject forces a re-parse of the project's markdown.
+func (a *App) RescanProject(idOrPath string) (int, error) {
+	c, err := a.dial()
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	var resp methods.ProjectRescanResponse
+	if err := c.Call("project.rescan", methods.ProjectRescanRequest{IDOrPath: idOrPath}, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Tasks, nil
+}
+
+// AddTask appends a new task to the project's backlog.md.
+func (a *App) AddTask(projectID, title, body, category string, priority int, resources []string) (methods.TaskAddResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.TaskAddResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.TaskAddResponse
+	req := methods.TaskAddRequest{
+		ProjectID: projectID, Title: title, Body: body,
+		Category: category, Priority: priority,
+		RequiredResources: resources,
+	}
+	if err := c.Call("task.add", req, &resp); err != nil {
+		return methods.TaskAddResponse{}, err
+	}
+	return resp, nil
+}
+
+// CmuxCandidates returns candidate cmux surfaces for a project (cwd matches
+// filtered to Claude sessions) plus the full surface list for a manual override.
+func (a *App) CmuxCandidates(projectID string) (methods.CmuxCandidatesResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.CmuxCandidatesResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.CmuxCandidatesResponse
+	req := methods.CmuxCandidatesRequest{ProjectID: projectID, ClaudeOnly: true}
+	if err := c.Call("cmux.candidates", req, &resp); err != nil {
+		return methods.CmuxCandidatesResponse{}, err
+	}
+	return resp, nil
+}
+
+// CmuxBind persists a cmux surface binding to .chief/project.yaml.
+func (a *App) CmuxBind(projectID, surfaceRef string) error {
+	c, err := a.dial()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	var resp methods.CmuxBindResponse
+	return c.Call("cmux.bind", methods.CmuxBindRequest{ProjectID: projectID, SurfaceRef: surfaceRef}, &resp)
+}
+
+// SendTask injects a prompt for the task into the project's bound cmux surface.
+// Returns { ok: true, prompt, surface_ref } or { ok: false, needs_binding: true, candidates }.
+type SendTaskResult struct {
+	OK           bool                        `json:"ok"`
+	SurfaceRef   string                      `json:"surface_ref,omitempty"`
+	Prompt       string                      `json:"prompt,omitempty"`
+	NeedsBinding bool                        `json:"needs_binding,omitempty"`
+	SurfaceGone  bool                        `json:"surface_gone,omitempty"`
+	Candidates   *methods.CmuxCandidatesResponse `json:"candidates,omitempty"`
+	Error        string                      `json:"error,omitempty"`
+}
+
+func (a *App) SendTask(taskID, surfaceOverride string) (SendTaskResult, error) {
+	c, err := a.dial()
+	if err != nil {
+		return SendTaskResult{}, err
+	}
+	defer c.Close()
+	var resp methods.TaskSendResponse
+	req := methods.TaskSendRequest{TaskID: taskID, SurfaceOverride: surfaceOverride}
+	if err := c.Call("task.send", req, &resp); err != nil {
+		// If it's an unbound/gone-surface error, load candidates so the UI can
+		// show a picker without a second round-trip.
+		if rpc, ok := err.(*ipc.RPCError); ok {
+			if rpc.Code == methods.ErrCodeCmuxUnbound || rpc.Code == methods.ErrCodeCmuxSurfaceGone {
+				// Look up the task's project id to fetch candidates.
+				projectID, cerr := a.projectIDForTask(taskID)
+				if cerr == nil {
+					if cands, cerr2 := a.CmuxCandidates(projectID); cerr2 == nil {
+						return SendTaskResult{
+							OK: false,
+							NeedsBinding: rpc.Code == methods.ErrCodeCmuxUnbound,
+							SurfaceGone:  rpc.Code == methods.ErrCodeCmuxSurfaceGone,
+							Candidates:   &cands,
+							Error:        rpc.Message,
+						}, nil
+					}
+				}
+			}
+		}
+		return SendTaskResult{OK: false, Error: err.Error()}, nil
+	}
+	return SendTaskResult{OK: true, SurfaceRef: resp.SurfaceRef, Prompt: resp.Prompt}, nil
+}
+
+// projectIDForTask looks up a task to find its project id — used by SendTask
+// when we need to hand candidates back to the UI.
+func (a *App) projectIDForTask(taskID string) (string, error) {
+	c, err := a.dial()
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	var resp methods.TaskShowResponse
+	if err := c.Call("task.show", methods.TaskShowRequest{ID: taskID}, &resp); err != nil {
+		return "", err
+	}
+	return resp.Task.ProjectID, nil
+}
+
+// GetProjectSessions returns Claude Code session JSONL info + whether the
+// claude-trace analyzer is installed. Used by the UI's Sessions section.
+func (a *App) GetProjectSessions(projectID string) (methods.ProjectSessionsResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.ProjectSessionsResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.ProjectSessionsResponse
+	if err := c.Call("project.sessions", methods.ProjectSessionsRequest{IDOrPath: projectID}, &resp); err != nil {
+		return methods.ProjectSessionsResponse{}, err
+	}
+	return resp, nil
+}
+
+// RevealInFinder opens the given absolute path in Finder (`open -R` reveals
+// with parent shown). Silently no-ops on error to avoid noisy UI popups.
+func (a *App) RevealInFinder(path string) error {
+	// -R selects the item in the parent dir if it exists; falls back to
+	// opening the path directly for directories.
+	return execOpen("-R", path)
+}
+
+// OpenPath opens a file or directory with the system default handler.
+func (a *App) OpenPath(path string) error {
+	return execOpen(path)
+}
+
+// OpenURL opens a URL in the default browser.
+func (a *App) OpenURL(url string) error {
+	return execOpen(url)
+}
+
+// OpenClaudeTrace launches the analyzer app if installed. Falls back to
+// revealing the sessions directory when not installed.
+func (a *App) OpenClaudeTrace(fallbackDir string) error {
+	return a.OpenClaudeTraceForProject("", fallbackDir)
+}
+
+// OpenClaudeTraceForProject launches the analyzer with --project <slug> so it
+// deep-links straight to that project's view (requires analyzer commit dc4cf19
+// or later). We invoke the .app's inner binary directly because macOS `open
+// --args` doesn't reliably forward flags to Wails apps via LaunchServices.
+//
+// If the analyzer isn't installed, falls back to revealing the sessions dir.
+func (a *App) OpenClaudeTraceForProject(projectSlug, fallbackDir string) error {
+	binPath := claudetrace.AnalyzerAppBinary()
+	if binPath == "" {
+		// No .app; try the CLI as a graceful fallback (opens the CLI-based
+		// dashboard indirectly via `ct` — user still gets something).
+		if _, err := exec.LookPath("ct"); err == nil {
+			if projectSlug != "" {
+				return exec.Command("ct", "sessions", projectSlug).Start()
+			}
+			return exec.Command("ct", "projects").Start()
+		}
+		if fallbackDir != "" {
+			return execOpen(fallbackDir)
+		}
+		return nil
+	}
+	args := []string{}
+	if projectSlug != "" {
+		args = append(args, "--project", projectSlug)
+	}
+	// Detach the child so it survives if chief-ui goes away.
+	cmd := exec.Command(binPath, args...)
+	cmd.Env = os.Environ()
+	return cmd.Start()
+}
+
+// InstallAnalyzer runs the analyzer install in chiefd. Blocks until done
+// (typically 5-60s: clone + go build + optional wails build). Returns the
+// installer log + status so the UI can show progress.
+func (a *App) InstallAnalyzer() (methods.AnalyzerInstallResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.AnalyzerInstallResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.AnalyzerInstallResponse
+	if err := c.Call("analyzer.install", methods.AnalyzerInstallRequest{}, &resp); err != nil {
+		return methods.AnalyzerInstallResponse{}, err
+	}
+	return resp, nil
+}
+
+// ReadProjectFile returns the raw text of a specific file (constitution.md,
+// PROJECT.md, etc.) inside a registered project. Restricted to a whitelist so
+// the UI can't turn into an arbitrary file reader.
+func (a *App) ReadProjectFile(projectID, filename string) (string, error) {
+	if !allowedProjectFile(filename) {
+		return "", fmt.Errorf("file not allowed: %s", filename)
+	}
+	c, err := a.dial()
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	var resp methods.ProjectListResponse
+	if err := c.Call("project.list", nil, &resp); err != nil {
+		return "", err
+	}
+	var repoPath string
+	for _, p := range resp.Projects {
+		if p.ID == projectID || p.Name == projectID || p.Path == projectID {
+			repoPath = p.Path
+			break
+		}
+	}
+	if repoPath == "" {
+		return "", fmt.Errorf("project not found: %s", projectID)
+	}
+	b, err := os.ReadFile(filepath.Join(repoPath, filename))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(b), nil
+}
+
+// ---------- helpers ----------
+
+func (a *App) dial() (*ipc.Client, error) {
+	sockPath, err := ipc.SocketPath()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.DialTimeout("unix", sockPath, 1*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("chiefd unreachable (%s): %w", sockPath, err)
+	}
+	return ipc.NewClient(conn), nil
+}
+
+func allowedProjectFile(name string) bool {
+	switch name {
+	case "constitution.md", "PROJECT.md", "backlog.md", "CLAUDE.md", "README.md":
+		return true
+	}
+	return false
+}

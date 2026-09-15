@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chris.chiefd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/chris/.local/bin/chiefd</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/chris/Library/Logs/Chief/chiefd.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/chris/Library/Logs/Chief/chiefd.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- PATH needs go/git/wails discoverable so `analyzer.install` and
+             future build tasks can shell to them. Order: user-local first,
+             then Go install, then Homebrew, then system. -->
+        <key>PATH</key>
+        <string>/Users/chris/.local/bin:/Users/chris/go/bin:/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
