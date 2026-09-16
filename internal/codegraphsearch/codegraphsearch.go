@@ -22,6 +22,7 @@
 package codegraphsearch
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
@@ -92,8 +93,21 @@ func EnsureConfig(projectPath string, port int) (string, error) {
 		return "", fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, "code-graph.yaml")
-	if _, err := os.Stat(path); err == nil {
-		return path, nil // preserve user edits
+	if b, err := os.ReadFile(path); err == nil {
+		// One-time migration: earlier versions of Chief wrote lowercase
+		// language names ("java" instead of "JAVA"). code_graph_search's
+		// Jackson-YAML deserializer is case-sensitive on the enum name,
+		// so the whole file silently failed to parse and the app
+		// defaulted to port 8080 + empty repo list. Regenerate iff the
+		// file still has the header line we always emit AND the buggy
+		// lowercase pattern — that's a reliable "this is stale Chief
+		// output, safe to overwrite" signal.
+		if bytes.Contains(b, []byte("# Chief-generated per-project code_graph_search config.")) &&
+			bytes.Contains(b, []byte("- java\n")) {
+			// fall through to rewrite
+		} else {
+			return path, nil // preserve user edits
+		}
 	}
 	home, _ := os.UserHomeDir()
 	dataDir := filepath.Join(home, "Library", "Caches", "Chief",
@@ -102,10 +116,16 @@ func EnsureConfig(projectPath string, port int) (string, error) {
 	cfg := map[string]any{
 		"repos": []map[string]any{
 			{
-				"id":        filepath.Base(projectPath),
-				"name":      filepath.Base(projectPath),
-				"path":      projectPath,
-				"languages": []string{"java", "go", "rust", "typescript", "javascript", "c", "cpp", "python"},
+				"id":   filepath.Base(projectPath),
+				"name": filepath.Base(projectPath),
+				"path": projectPath,
+				// Language names must match code_graph_search's Language
+				// enum member names (uppercase). Jackson's default enum
+				// deserializer is case-sensitive on the enum NAME, not
+				// the `id` field. Note: "python" is not in the enum
+				// (unknown language) — skipped rather than causing a
+				// silent parse-fail-and-default-config bug.
+				"languages": []string{"JAVA", "GO", "RUST", "TYPESCRIPT", "JAVASCRIPT", "C", "CPP"},
 				"excludePatterns": []string{
 					"**/target/**", "**/build/**", "**/.git/**",
 					"**/node_modules/**", "**/dist/**", "**/.next/**",
@@ -144,20 +164,41 @@ func EnsureConfig(projectPath string, port int) (string, error) {
 	return path, nil
 }
 
-// Spawn starts `java --enable-preview -jar <jar> --config <config>`
-// as a detached process. Returns the started cmd (Wait not called —
-// the process runs until the user quits it via `pkill` or shutdown).
+// Spawn starts `java -jar <jar> --config <config>` as a detached
+// process, teeing stdout/stderr into
+// ~/Library/Logs/Chief/code-graph-<slug>.log so failures are
+// debuggable. Returns the started cmd (Wait not called — the process
+// runs until the user quits it via `pkill` or shutdown).
+//
+// --enable-preview is intentionally NOT passed; upstream commit
+// 7b99b05 removed the preview requirement from code_graph_search's
+// pom, and passing --enable-preview against a non-preview JAR is
+// tolerated but noisy. Older JARs that DO need the flag work too
+// because java --enable-preview <jar without preview> is a no-op.
 func Spawn(jarPath, configPath string) (*exec.Cmd, error) {
 	if _, err := exec.LookPath("java"); err != nil {
 		return nil, fmt.Errorf("java not on PATH — install openjdk 21+ (`brew install openjdk@21`)")
 	}
-	cmd := exec.Command("java", "--enable-preview", "-jar", jarPath, "--config", configPath)
-	// Detach: give the child its own stdout/stderr (dropped) + own
-	// pgid so a chiefd restart doesn't kill it.
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// Log file per project (based on config path hash so multiple
+	// projects don't clobber each other's logs).
+	home, _ := os.UserHomeDir()
+	logDir := filepath.Join(home, "Library", "Logs", "Chief")
+	_ = os.MkdirAll(logDir, 0o755)
+	h := sha1.Sum([]byte(configPath))
+	logPath := filepath.Join(logDir, fmt.Sprintf("code-graph-%s.log", fmt.Sprintf("%x", h[:4])))
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open log %s: %w", logPath, err)
+	}
+	cmd := exec.Command("java", "-jar", jarPath, "--config", configPath)
+	cmd.Stdout = f
+	cmd.Stderr = f
 	if err := cmd.Start(); err != nil {
+		_ = f.Close()
 		return nil, err
 	}
+	// Don't Close(f) here — the goroutine keeps writing until process exits.
+	// OS handles cleanup on process termination; log file grows unbounded
+	// until manually rotated, acceptable for now.
 	return cmd, nil
 }

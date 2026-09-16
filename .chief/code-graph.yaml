@@ -1,0 +1,37 @@
+# Chief-generated per-project code_graph_search config.
+# Safe to edit. Chief re-uses this file on subsequent launches;
+# delete it to regenerate with defaults.
+
+indexer:
+    autoWatch: true
+    dataDir: /Users/chris/Library/Caches/Chief/code_graph_search-data/chief
+    indexingThreads: 4
+    watchDebounceMs: 500
+repos:
+    - excludePatterns:
+        - '**/target/**'
+        - '**/build/**'
+        - '**/.git/**'
+        - '**/node_modules/**'
+        - '**/dist/**'
+        - '**/.next/**'
+        - '**/vendor/**'
+        - '**/__pycache__/**'
+      id: chief
+      languages:
+        - JAVA
+        - GO
+        - RUST
+        - TYPESCRIPT
+        - JAVASCRIPT
+        - C
+        - CPP
+      name: chief
+      path: /Users/chris/code/claude_world/chief
+server:
+    mcpHttpEnabled: true
+    mcpStdioEnabled: false
+    port: 35148
+treeSitter:
+    enabled: true
+    timeoutSeconds: 30

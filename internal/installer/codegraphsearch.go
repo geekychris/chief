@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -95,6 +96,22 @@ func InstallCodeGraphSearch(ctx context.Context) InstallResult {
 	log("$ ./build.sh")
 	if out, err := runCmd(ctx, repoDir, "bash", "./build.sh"); err != nil {
 		log("%s", out)
+		// Detect the "JDK > 21 rejects source=21 with --enable-preview"
+		// build failure that older code_graph_search checkouts hit +
+		// give the exact fix. Upstream commit 7b99b05 removes the
+		// preview flag entirely, so a `git pull` in the cache dir
+		// fixes it too — the retry loop lands that on the next
+		// install run.
+		if strings.Contains(out, "--enable-preview") &&
+			strings.Contains(out, "invalid source release 21") {
+			return finish(fmt.Errorf(
+				"code_graph_search build rejected because your JDK is newer than 21 " +
+					"and the checkout has an older pom that pins source=21 with " +
+					"--enable-preview. Fix: `git -C ~/Library/Caches/Chief/code_graph_search " +
+					"pull` to pick up upstream commit 7b99b05 (drops the preview flag), " +
+					"or install `brew install openjdk@21` and export JAVA_HOME to it " +
+					"before rerunning"))
+		}
 		return finish(fmt.Errorf("build.sh failed: %w", err))
 	} else {
 		// mvn output is enormous; keep the last ~4KB.
