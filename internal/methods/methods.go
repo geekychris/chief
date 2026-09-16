@@ -144,6 +144,36 @@ type StatsPerProject struct {
 	CompletedWindow int   `json:"completed_window"`
 }
 
+// ---------- stats.detailed (dashboard) ----------
+
+type StatsDetailedRequest struct {
+	Days int `json:"days,omitempty"` // rolling window; default 14
+}
+
+type StatsDetailedResponse struct {
+	Days             int              `json:"days"`
+	CompletionsPerDay []TimeseriesPoint `json:"completions_per_day"`
+	FlagsPerDay      []TimeseriesPoint `json:"flags_per_day"`
+	WakePokesPerDay  []TimeseriesPoint `json:"wake_pokes_per_day"`
+	UrgencyBreakdown map[string]int64  `json:"urgency_breakdown"`
+	CategoryBreakdown map[string]int64 `json:"category_breakdown"`
+	ProjectPending   map[string]int64  `json:"project_pending"`   // {name: count}
+	ProjectDone      map[string]int64  `json:"project_done"`      // {name: count}
+}
+
+// TimeseriesPoint mirrors store.KindTimeseriesPoint on the wire.
+type TimeseriesPoint struct {
+	Bucket string `json:"bucket"`
+	Count  int64  `json:"count"`
+}
+
+// ---------- lint.run ----------
+
+type LintRunRequest struct{}
+type LintRunResponse struct {
+	Fired int `json:"fired"` // number of violation flags raised
+}
+
 // ---------- outliers ----------
 
 // OutliersRequest asks for tasks that have been stuck (pending too

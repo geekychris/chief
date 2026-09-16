@@ -537,6 +537,21 @@ func (a *App) ReadProjectFile(projectID, filename string) (string, error) {
 	return string(b), nil
 }
 
+// StatsDetailed returns the aggregated analytics payload used by the
+// dashboard modal. days=0 uses the server default (14).
+func (a *App) StatsDetailed(days int) (methods.StatsDetailedResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.StatsDetailedResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.StatsDetailedResponse
+	if err := c.Call("stats.detailed", methods.StatsDetailedRequest{Days: days}, &resp); err != nil {
+		return methods.StatsDetailedResponse{}, err
+	}
+	return resp, nil
+}
+
 // NextUp returns the top-N pending tasks across all projects, ranked
 // (priority DESC, source_line ASC). Powers the Next Up modal.
 func (a *App) NextUp(limit int) ([]methods.BacklogRow, error) {

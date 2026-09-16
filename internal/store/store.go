@@ -489,6 +489,112 @@ func (s *Store) SearchTasks(ctx context.Context, query string, limit int) ([]Tas
 	return out, rows.Err()
 }
 
+// KindTimeseriesPoint is one bucket in a per-day (or per-week) count
+// of events of a given kind. Used by the analytics dashboard for
+// task-velocity + notification-volume charts.
+type KindTimeseriesPoint struct {
+	Bucket string `json:"bucket"` // YYYY-MM-DD or YYYY-Www label
+	Count  int64  `json:"count"`
+}
+
+// KindTimeseries aggregates event counts of `kind` into daily buckets
+// covering `days` back from now. Days=0 uses 14. Buckets with zero
+// count are included so the chart renders a continuous X axis.
+func (s *Store) KindTimeseries(ctx context.Context, kind string, days int) ([]KindTimeseriesPoint, error) {
+	if days <= 0 {
+		days = 14
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days).Truncate(24 * time.Hour)
+	// Pre-populate buckets so gaps show as zeros.
+	buckets := make([]KindTimeseriesPoint, days+1)
+	for i := 0; i <= days; i++ {
+		buckets[i].Bucket = since.AddDate(0, 0, i).Format("2006-01-02")
+	}
+	index := map[string]int{}
+	for i, b := range buckets {
+		index[b.Bucket] = i
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT substr(ts, 1, 10) AS day, COUNT(*)
+		  FROM events
+		 WHERE kind = ? AND ts >= ?
+		 GROUP BY day
+		 ORDER BY day ASC`,
+		kind, since.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var day string
+		var count int64
+		if err := rows.Scan(&day, &count); err != nil {
+			return nil, err
+		}
+		if i, ok := index[day]; ok {
+			buckets[i].Count = count
+		}
+	}
+	return buckets, rows.Err()
+}
+
+// UrgencyBreakdown returns counts of flags currently in the flags
+// table grouped by urgency. Powers the "notification volume by
+// urgency" chart. Includes acknowledged flags — the chart shows
+// historical distribution, not just open.
+func (s *Store) UrgencyBreakdown(ctx context.Context, sinceDays int) (map[string]int64, error) {
+	since := time.Now().UTC().AddDate(0, 0, -sinceDays)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT urgency, COUNT(*)
+		  FROM flags
+		 WHERE created_at >= ?
+		 GROUP BY urgency`,
+		since.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var urg string
+		var count int64
+		if err := rows.Scan(&urg, &count); err != nil {
+			return nil, err
+		}
+		out[urg] = count
+	}
+	return out, rows.Err()
+}
+
+// CategoryBreakdown returns pending task counts grouped by category
+// across every project. Powers the "top categories" bar chart.
+func (s *Store) CategoryBreakdown(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT category, COUNT(*)
+		  FROM tasks
+		 WHERE status = 'pending'
+		 GROUP BY category`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var cat string
+		var count int64
+		if err := rows.Scan(&cat, &count); err != nil {
+			return nil, err
+		}
+		if cat == "" {
+			cat = "(uncategorised)"
+		}
+		out[cat] = count
+	}
+	return out, rows.Err()
+}
+
 // StaleTasks returns pending or active tasks that have been in that
 // state longer than the configured thresholds. Substitutes the real
 // "revive_count" heuristic (which requires the claim flow / MCP layer

@@ -44,6 +44,7 @@ func main() {
 		searchCmd(),
 		digestCmd(),
 		outliersCmd(),
+		lintCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -927,6 +928,31 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// lintCmd forces a constitution sweep across every registered project
+// (reads .chief/lint.yaml, scans Claude session logs for forbidden
+// Bash commands, raises info flags per hit). No-op for projects
+// without lint.yaml.
+func lintCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "lint",
+		Short: "Sweep session logs for constitution violations now (raises info flags per hit).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.LintRunResponse
+			if err := c.Call("lint.run", methods.LintRunRequest{}, &resp); err != nil {
+				return err
+			}
+			fmt.Printf("lint sweep complete — %d new violation flag(s)\n", resp.Fired)
+			return nil
+		},
+	}
+	return cmd
 }
 
 func outliersCmd() *cobra.Command {

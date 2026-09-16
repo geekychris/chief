@@ -1,5 +1,8 @@
 # Completed
 
+- [x] {id:6db5} Analytics dashboard in the Wails UI [category:Operations logging & analytics] (done 2026-09-16 04:39:15)
+- [x] {id:04b7} Voice / phone quick-add via Telegram [category:Agentic ergonomics] (done 2026-09-16 04:39:15)
+- [x] {id:249e} Constitution linter [category:Agentic ergonomics] (done 2026-09-16 04:39:15)
 - [x] {id:1c88} For completed work I want the timestamp when it was reported [category:Backlog] (done 2026-09-16 04:25:49)
 - [x] {id:531e} Surface task-duration + revive-count outliers in the UI [category:Operations logging & analytics] (done 2026-09-16 04:25:49)
 - [x] {id:e38e} Task splitting proposal flow [category:Multi-project coordination] (done 2026-09-16 04:25:49)

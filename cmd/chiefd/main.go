@@ -37,6 +37,7 @@ import (
 	"github.com/geekychris/chief/internal/fswatch"
 	"github.com/geekychris/chief/internal/gitshim"
 	"github.com/geekychris/chief/internal/historyviewer"
+	"github.com/geekychris/chief/internal/inbound"
 	"github.com/geekychris/chief/internal/installer"
 	"github.com/geekychris/chief/internal/ipc"
 	"github.com/geekychris/chief/internal/messaging"
@@ -238,8 +239,44 @@ func run() error {
 		digest.Run(ctx)
 	}()
 
+	// Inbound bots (04b7): launch Listen for every registered
+	// backend that implements IncomingBackend (currently: Telegram).
+	// Command parser lives in internal/inbound; replies go back
+	// through the same backend that surfaced the message.
+	inboundRouter := &inbound.Router{Store: st, Projects: mgr, Att: att}
+	var inboundDones []<-chan struct{}
+	for name, b := range router.Backends {
+		ib, ok := b.(messaging.IncomingBackend)
+		if !ok {
+			continue
+		}
+		done := make(chan struct{})
+		inboundDones = append(inboundDones, done)
+		backendName := name
+		listener := ib
+		go func() {
+			defer close(done)
+			inboundRouter.SendBackend = listener
+			if err := listener.Listen(ctx, inboundRouter.Handle); err != nil && ctx.Err() == nil {
+				slog.Warn("inbound listener exited", "backend", backendName, "err", err)
+			}
+		}()
+	}
+
+	// Constitution linter (249e, periodic v1): scans each project's
+	// Claude session jsonl files for forbidden Bash commands per
+	// .chief/lint.yaml. Runs every 6h; no-op unless the config file
+	// exists. Post-turn hook variant deferred until Claude hooks are
+	// wired.
+	lint := &orchestrator.LintSweeper{Store: st, Attention: att}
+	lintDone := make(chan struct{})
+	go func() {
+		defer close(lintDone)
+		lint.Run(ctx)
+	}()
+
 	srv := ipc.NewServer()
-	registerMethods(srv, st, mgr, watcher, att, cfg, digest)
+	registerMethods(srv, st, mgr, watcher, att, cfg, digest, lint)
 
 	slog.Info("chiefd started", "socket", sockPath, "version", Version, "pid", os.Getpid())
 
@@ -275,6 +312,10 @@ func run() error {
 	<-sweepDone
 	<-retentionDone
 	<-digestDone
+	<-lintDone
+	for _, done := range inboundDones {
+		<-done
+	}
 
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
@@ -324,7 +365,7 @@ func setupLogger() (*slog.Logger, func(), error) {
 
 // registerMethods wires the per-milestone method surface. Handlers close over
 // the store/manager/watcher via method-level factories to avoid globals.
-func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config, digest *orchestrator.DigestSweeper) {
+func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config, digest *orchestrator.DigestSweeper, lint *orchestrator.LintSweeper) {
 	s.Register("ping", handlePing)
 	s.Register("project.add", handleProjectAdd(st, mgr, w))
 	s.Register("project.list", handleProjectList(st))
@@ -333,8 +374,10 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("backlog.list", handleBacklogList(st))
 	s.Register("backlog.next", handleBacklogNext(st))
 	s.Register("stats.summary", handleStatsSummary(st))
+	s.Register("stats.detailed", handleStatsDetailed(st))
 	s.Register("search", handleSearch(st))
 	s.Register("outliers", handleOutliers(st))
+	s.Register("lint.run", handleLintRun(lint, st))
 	s.Register("digest.preview", handleDigestPreview(digest))
 	s.Register("digest.fire", handleDigestFire(digest))
 	s.Register("task.show", handleTaskShow(st))
@@ -1425,6 +1468,76 @@ func handleBacklogNext(st *store.Store) ipc.Handler {
 			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
 		}
 		return methods.BacklogNextResponse{Tasks: rows}, nil
+	}
+}
+
+// ---------- stats.detailed ----------
+
+func handleStatsDetailed(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.StatsDetailedRequest
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &req)
+		}
+		days := req.Days
+		if days <= 0 {
+			days = 14
+		}
+		ctx := context.Background()
+		toWire := func(in []store.KindTimeseriesPoint) []methods.TimeseriesPoint {
+			out := make([]methods.TimeseriesPoint, len(in))
+			for i, p := range in {
+				out[i] = methods.TimeseriesPoint{Bucket: p.Bucket, Count: p.Count}
+			}
+			return out
+		}
+		completions, _ := st.KindTimeseries(ctx, "rescan.completed", days)
+		flags, _ := st.KindTimeseries(ctx, "flag.raised", days)
+		wakes, _ := st.KindTimeseries(ctx, "task.sent", days)
+		urgencies, _ := st.UrgencyBreakdown(ctx, days)
+		categories, _ := st.CategoryBreakdown(ctx)
+
+		projs, _ := st.ListProjects(ctx)
+		pending := map[string]int64{}
+		done := map[string]int64{}
+		for _, p := range projs {
+			tasks, _ := st.ListTasks(ctx, store.TaskFilter{ProjectID: p.ID})
+			for _, t := range tasks {
+				switch t.Status {
+				case store.TaskPending:
+					pending[p.Name]++
+				case store.TaskDone:
+					done[p.Name]++
+				}
+			}
+		}
+		return methods.StatsDetailedResponse{
+			Days:              days,
+			CompletionsPerDay: toWire(completions),
+			FlagsPerDay:       toWire(flags),
+			WakePokesPerDay:   toWire(wakes),
+			UrgencyBreakdown:  urgencies,
+			CategoryBreakdown: categories,
+			ProjectPending:    pending,
+			ProjectDone:       done,
+		}, nil
+	}
+}
+
+// ---------- lint.run ----------
+
+func handleLintRun(l *orchestrator.LintSweeper, st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		before, _ := st.CountOpenFlags(context.Background(), "")
+		if err := l.Sweep(context.Background()); err != nil {
+			return nil, err
+		}
+		after, _ := st.CountOpenFlags(context.Background(), "")
+		fired := after - before
+		if fired < 0 {
+			fired = 0
+		}
+		return methods.LintRunResponse{Fired: fired}, nil
 	}
 }
 

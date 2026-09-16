@@ -12,7 +12,7 @@ import {
   HistoryViewerStatus, InstallHistoryViewer, OpenHistoryViewer,
   ListFlags, CountOpenFlags, AnswerFlag,
   ApproveNextTask, SkipNextTask, SnoozeNextTask,
-  NextUp,
+  NextUp, StatsDetailed,
 } from '../wailsjs/go/main/App';
 
 // -------- state --------
@@ -107,6 +107,13 @@ const els = {
   nextUpList: $('nextup-list'),
   nextUpCountLabel: $('nextup-count-label'),
   btnNextUpClose: $('btn-nextup-close'),
+  // Analytics dashboard
+  btnStats: $('btn-stats'),
+  modalStats: $('modal-stats'),
+  statsCharts: $('stats-charts'),
+  statsWindowLabel: $('stats-window-label'),
+  statsWindowSelect: $('stats-window-select'),
+  btnStatsClose: $('btn-stats-close'),
 };
 
 // Current sessions payload (set by loadProjectDocs).
@@ -147,6 +154,9 @@ els.btnInbox.addEventListener('click', openInbox);
 els.btnInboxClose.addEventListener('click', () => els.modalInbox.classList.add('hidden'));
 els.btnNextUp.addEventListener('click', openNextUp);
 els.btnNextUpClose.addEventListener('click', () => els.modalNextUp.classList.add('hidden'));
+els.btnStats.addEventListener('click', openStats);
+els.btnStatsClose.addEventListener('click', () => els.modalStats.classList.add('hidden'));
+els.statsWindowSelect.addEventListener('change', () => { if (!els.modalStats.classList.contains('hidden')) renderStats(); });
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
     e.preventDefault();
@@ -327,6 +337,215 @@ async function actOnNext(kind, flagID, minutes = 0) {
 function escapeHTML(s) {
   if (s == null) return '';
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---- Analytics dashboard.
+// Inline SVG bar charts (no Chart.js CDN — the app is offline-capable
+// and I want to keep the bundled dist small). Two chart shapes:
+//   - Timeseries: N days of bars with the count above the bar
+//   - Categorical: horizontal bars ranked by count
+
+async function openStats() {
+  els.modalStats.classList.remove('hidden');
+  await renderStats();
+}
+
+async function renderStats() {
+  els.statsCharts.innerHTML = '<div class="empty">Loading…</div>';
+  const days = parseInt(els.statsWindowSelect.value, 10) || 14;
+  let data;
+  try {
+    data = await StatsDetailed(days);
+  } catch (e) {
+    els.statsCharts.innerHTML = `<div class="empty">error: ${e}</div>`;
+    return;
+  }
+  els.statsWindowLabel.textContent = `(${days}d window)`;
+  els.statsCharts.innerHTML = '';
+  // 1. Task velocity (rescan.completed events per day)
+  els.statsCharts.appendChild(timeseriesChart('Completions per day', data.completions_per_day, 'var(--good)'));
+  // 2. Flags raised per day
+  els.statsCharts.appendChild(timeseriesChart('Flags raised per day', data.flags_per_day, 'var(--warn)'));
+  // 3. Wake-up pokes per day (task.sent events)
+  els.statsCharts.appendChild(timeseriesChart('Wake-up pokes per day', data.wake_pokes_per_day, 'var(--accent-2)'));
+  // 4. Urgency distribution — categorical
+  els.statsCharts.appendChild(categoricalChart('Notification urgency mix', data.urgency_breakdown, {
+    urgent: 'var(--bad)', attention: 'var(--warn)', info: 'var(--text-dim)',
+  }));
+  // 5. Top categories (pending tasks by category)
+  els.statsCharts.appendChild(categoricalChart('Top pending categories', data.category_breakdown, null, 8));
+  // 6. Per-project activity (pending + done side by side)
+  els.statsCharts.appendChild(stackedProjectChart(data.project_pending, data.project_done));
+}
+
+function timeseriesChart(title, points, color) {
+  const div = document.createElement('div');
+  div.className = 'chart';
+  const h3 = document.createElement('h3');
+  h3.textContent = title;
+  div.appendChild(h3);
+  if (!points || points.length === 0) {
+    div.classList.add('empty-chart');
+    div.appendChild(document.createTextNode('(no data in window)'));
+    return div;
+  }
+  const max = Math.max(1, ...points.map(p => p.count));
+  const w = 360, h = 130, pad = 8;
+  const bw = (w - pad * 2) / points.length;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  points.forEach((p, i) => {
+    const barH = (p.count / max) * (h - pad * 2);
+    const x = pad + i * bw;
+    const y = h - pad - barH;
+    const rect = document.createElementNS(svgNS, 'rect');
+    rect.setAttribute('x', x + 1);
+    rect.setAttribute('y', y);
+    rect.setAttribute('width', Math.max(1, bw - 2));
+    rect.setAttribute('height', barH);
+    rect.setAttribute('fill', color);
+    rect.setAttribute('opacity', p.count > 0 ? '0.9' : '0.15');
+    const t = document.createElementNS(svgNS, 'title');
+    t.textContent = `${p.bucket}: ${p.count}`;
+    rect.appendChild(t);
+    svg.appendChild(rect);
+  });
+  div.appendChild(svg);
+  const legend = document.createElement('div');
+  legend.className = 'chart-legend';
+  legend.innerHTML = `<span class="lbl">${points[0].bucket}</span><span class="lbl">${points[points.length - 1].bucket}</span><span class="lbl">max ${max}</span>`;
+  div.appendChild(legend);
+  return div;
+}
+
+function categoricalChart(title, bucketMap, colorMap, limit) {
+  const div = document.createElement('div');
+  div.className = 'chart';
+  const h3 = document.createElement('h3');
+  h3.textContent = title;
+  div.appendChild(h3);
+  let entries = Object.entries(bucketMap || {});
+  entries.sort((a, b) => b[1] - a[1]);
+  if (limit) entries = entries.slice(0, limit);
+  if (entries.length === 0) {
+    div.classList.add('empty-chart');
+    div.appendChild(document.createTextNode('(no data)'));
+    return div;
+  }
+  const max = Math.max(1, ...entries.map(e => e[1]));
+  const rowH = 20;
+  const w = 360, h = rowH * entries.length + 4;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.style.height = h + 'px';
+  entries.forEach(([label, count], i) => {
+    const barW = Math.max(2, (count / max) * (w - 140));
+    const rect = document.createElementNS(svgNS, 'rect');
+    rect.setAttribute('x', 130);
+    rect.setAttribute('y', i * rowH + 2);
+    rect.setAttribute('width', barW);
+    rect.setAttribute('height', rowH - 4);
+    rect.setAttribute('fill', (colorMap && colorMap[label]) || 'var(--accent-2)');
+    rect.setAttribute('rx', 2);
+    svg.appendChild(rect);
+    const text = document.createElementNS(svgNS, 'text');
+    text.setAttribute('x', 4);
+    text.setAttribute('y', i * rowH + rowH / 2 + 4);
+    text.setAttribute('fill', 'var(--text)');
+    text.setAttribute('font-size', '11');
+    text.textContent = label.length > 18 ? label.slice(0, 16) + '…' : label;
+    svg.appendChild(text);
+    const val = document.createElementNS(svgNS, 'text');
+    val.setAttribute('x', 130 + barW + 4);
+    val.setAttribute('y', i * rowH + rowH / 2 + 4);
+    val.setAttribute('fill', 'var(--text-dim)');
+    val.setAttribute('font-size', '11');
+    val.textContent = count;
+    svg.appendChild(val);
+  });
+  div.appendChild(svg);
+  return div;
+}
+
+function stackedProjectChart(pending, done) {
+  const div = document.createElement('div');
+  div.className = 'chart';
+  const h3 = document.createElement('h3');
+  h3.textContent = 'Per-project activity';
+  div.appendChild(h3);
+  const names = new Set([...Object.keys(pending || {}), ...Object.keys(done || {})]);
+  if (names.size === 0) {
+    div.classList.add('empty-chart');
+    div.appendChild(document.createTextNode('(no projects)'));
+    return div;
+  }
+  const rows = Array.from(names).map(n => ({
+    name: n, pending: pending[n] || 0, done: done[n] || 0,
+  })).sort((a, b) => (b.pending + b.done) - (a.pending + a.done)).slice(0, 8);
+  const max = Math.max(1, ...rows.map(r => r.pending + r.done));
+  const rowH = 20;
+  const w = 360, h = rowH * rows.length + 4;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.style.height = h + 'px';
+  rows.forEach((r, i) => {
+    const total = r.pending + r.done;
+    const y = i * rowH + 2;
+    const nameText = document.createElementNS(svgNS, 'text');
+    nameText.setAttribute('x', 4);
+    nameText.setAttribute('y', y + rowH / 2 + 3);
+    nameText.setAttribute('fill', 'var(--text)');
+    nameText.setAttribute('font-size', '11');
+    nameText.textContent = r.name.length > 14 ? r.name.slice(0, 12) + '…' : r.name;
+    svg.appendChild(nameText);
+    const scale = (w - 130) / max;
+    // pending bar (accent color)
+    if (r.pending > 0) {
+      const rp = document.createElementNS(svgNS, 'rect');
+      rp.setAttribute('x', 110);
+      rp.setAttribute('y', y);
+      rp.setAttribute('width', r.pending * scale);
+      rp.setAttribute('height', rowH - 4);
+      rp.setAttribute('fill', 'var(--accent)');
+      rp.setAttribute('rx', 2);
+      const tp = document.createElementNS(svgNS, 'title');
+      tp.textContent = `${r.name}: ${r.pending} pending`;
+      rp.appendChild(tp);
+      svg.appendChild(rp);
+    }
+    // done bar (good color) — stacked next to pending
+    if (r.done > 0) {
+      const rd = document.createElementNS(svgNS, 'rect');
+      rd.setAttribute('x', 110 + r.pending * scale);
+      rd.setAttribute('y', y);
+      rd.setAttribute('width', r.done * scale);
+      rd.setAttribute('height', rowH - 4);
+      rd.setAttribute('fill', 'var(--good)');
+      rd.setAttribute('rx', 2);
+      const td = document.createElementNS(svgNS, 'title');
+      td.textContent = `${r.name}: ${r.done} done`;
+      rd.appendChild(td);
+      svg.appendChild(rd);
+    }
+    const val = document.createElementNS(svgNS, 'text');
+    val.setAttribute('x', 110 + total * scale + 4);
+    val.setAttribute('y', y + rowH / 2 + 4);
+    val.setAttribute('fill', 'var(--text-dim)');
+    val.setAttribute('font-size', '11');
+    val.textContent = `${r.pending}/${r.done}`;
+    svg.appendChild(val);
+  });
+  div.appendChild(svg);
+  const legend = document.createElement('div');
+  legend.className = 'chart-legend';
+  legend.innerHTML = `<span class="lbl"><span class="swatch" style="background:var(--accent)"></span>pending</span><span class="lbl"><span class="swatch" style="background:var(--good)"></span>done</span>`;
+  div.appendChild(legend);
+  return div;
 }
 
 // ---- Next Up: cross-project ranked queue.
