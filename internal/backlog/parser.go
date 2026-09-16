@@ -36,6 +36,7 @@ const (
 	StatusPending  Status = "pending"
 	StatusDone     Status = "done"
 	StatusDeferred Status = "deferred"
+	StatusDropped  Status = "dropped"
 )
 
 // Task is one parsed checkbox item.
@@ -60,10 +61,12 @@ type LineEdit struct {
 	New     string
 }
 
-// checkboxRE matches "- [ ] rest", "- [x] rest", "- [X] rest", "- [~] rest".
-// Leading whitespace is captured so we can distinguish top-level checkboxes
-// from indented sub-bullets (only column-0 checkboxes are tasks).
-var checkboxRE = regexp.MustCompile(`^(\s*)-\s+\[([ xX~])\]\s+(.*)$`)
+// checkboxRE matches "- [ ] rest", "- [x] rest", "- [X] rest", "- [~] rest",
+// "- [!] rest".  Leading whitespace is captured so we can distinguish
+// top-level checkboxes from indented sub-bullets (only column-0 checkboxes
+// are tasks).  Marker glyphs: ' ' pending, 'x'/'X' done, '~' deferred,
+// '!' dropped (soft-delete archive under dropped.md).
+var checkboxRE = regexp.MustCompile(`^(\s*)-\s+\[([ xX~!])\]\s+(.*)$`)
 
 // idRE matches a leading "{id:HEX}" prefix on the payload text.
 var idRE = regexp.MustCompile(`^\{id:([a-fA-F0-9]+)\}\s*`)
@@ -76,6 +79,10 @@ var doneParenRE = regexp.MustCompile(`\(done\s+([^)]+)\)`)
 
 // deferredParenRE matches "(deferred: ...)" suffix on deferred tasks.
 var deferredParenRE = regexp.MustCompile(`\(deferred:\s*([^)]+)\)`)
+
+// droppedParenRE matches "(dropped ...)" or "(dropped ...: reason)" suffixes
+// on dropped tasks (soft-deleted, archived under dropped.md).
+var droppedParenRE = regexp.MustCompile(`\(dropped\s+([^)]+)\)`)
 
 // headerRE matches Markdown H1/H2/H3 headers. We take the deepest as Category.
 var headerRE = regexp.MustCompile(`^(#{1,3})\s+(.*)$`)
@@ -186,6 +193,8 @@ func statusFromCheckbox(c string) Status {
 		return StatusDone
 	case "~":
 		return StatusDeferred
+	case "!":
+		return StatusDropped
 	default:
 		return StatusPending
 	}
@@ -210,6 +219,15 @@ func parsePayload(t *Task, payload string) {
 	if t.Status == StatusDeferred {
 		if m := deferredParenRE.FindStringSubmatchIndex(payload); m != nil {
 			t.DeferredReason = strings.TrimSpace(payload[m[2]:m[3]])
+			payload = strings.TrimRight(payload[:m[0]]+payload[m[1]:], " ")
+		}
+	}
+	if t.Status == StatusDropped {
+		if m := droppedParenRE.FindStringSubmatchIndex(payload); m != nil {
+			// May carry a "TIMESTAMP: reason" split; keep the full string
+			// in CompletedAt for now (repurposing the field — dropped items
+			// use it as "dropped at" timestamp+optional reason).
+			t.CompletedAt = strings.TrimSpace(payload[m[2]:m[3]])
 			payload = strings.TrimRight(payload[:m[0]]+payload[m[1]:], " ")
 		}
 	}

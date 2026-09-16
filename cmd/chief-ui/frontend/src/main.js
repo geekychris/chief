@@ -724,10 +724,10 @@ async function deleteCurrentTask() {
   const t = state.tasks.find(x => x.id === state.selectedTaskId);
   if (!t) return;
   if (t.source_file !== 'backlog.md') {
-    alert('Only backlog.md items are deletable in-app. Completed items live in completedlog.md as history.');
+    alert('Only backlog.md items can be dropped in-app. Historical items in completedlog.md / dropped.md stay as archives.');
     return;
   }
-  if (!confirm(`Delete task ${t.id}?\n\n${t.title}\n\nThis removes the line from backlog.md.`)) return;
+  if (!confirm(`Drop task ${t.id}?\n\n${t.title}\n\nRemoves from backlog.md and archives to dropped.md.`)) return;
   try {
     await DeleteTask(t.id);
     state.selectedTaskId = '';
@@ -735,7 +735,7 @@ async function deleteCurrentTask() {
     els.detail.classList.add('hidden');
     await refreshAll();
   } catch (e) {
-    alert('Delete failed: ' + (e.message || e));
+    alert('Drop failed: ' + (e.message || e));
   }
 }
 
@@ -791,9 +791,10 @@ function statusGlyph(s) {
   switch (s) {
     case 'pending': return '[ ]';
     case 'active': return '[*]';
-    case 'blocked': return '[!]';
+    case 'blocked': return '[⚠]';
     case 'deferred': return '[~]';
     case 'done': return '[x]';
+    case 'dropped': return '[!]';
     default: return '[?]';
   }
 }

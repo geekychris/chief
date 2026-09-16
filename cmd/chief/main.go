@@ -332,11 +332,13 @@ func statusGlyph(s string) string {
 	case "active":
 		return "[*]"
 	case "blocked":
-		return "[!]"
+		return "[⚠]"
 	case "deferred":
 		return "[~]"
 	case "done":
 		return "[x]"
+	case "dropped":
+		return "[!]"
 	default:
 		return "[?]"
 	}

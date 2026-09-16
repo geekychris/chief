@@ -33,6 +33,7 @@ type Handler func(projectID, path string)
 var TrackedFiles = map[string]bool{
 	"backlog.md":      true,
 	"completedlog.md": true,
+	"dropped.md":      true,
 	"constitution.md": true,
 	"PROJECT.md":      true,
 }

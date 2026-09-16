@@ -148,6 +148,7 @@ select { background: var(--bg-elev); color: var(--text); border: 1px solid var(-
 .st-blocked { color: var(--bad); }
 .st-deferred { color: var(--warn); }
 .st-done { color: var(--good); text-decoration: line-through; opacity: 0.7; }
+.st-dropped { color: var(--text-dim); text-decoration: line-through; opacity: 0.5; font-style: italic; }
 
 .project-meta {
   padding: 14px;

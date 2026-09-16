@@ -319,40 +319,72 @@ func (m *Manager) UpdateTask(ctx context.Context, taskID string, opts UpdateTask
 	return m.Store.GetTask(ctx, taskID)
 }
 
-// DeleteTask removes a task from backlog.md (checkbox line + body). The
-// subsequent Rescan drops the row from the DB. Only supports backlog.md
-// items — completedlog.md entries stay as historical record and should be
-// edited manually if the user really wants to expunge them.
+// DeleteTask soft-deletes a task: archives it to dropped.md (newest-first,
+// with a timestamped `- [!]` entry) and removes it from backlog.md. The
+// subsequent Rescan sees the task in dropped.md with status "dropped".
+// Idempotent: if the task is already in dropped.md the archive step is a
+// no-op (HasTaskID dedupe).
+//
+// Only backlog.md items are directly deletable — completed items in
+// completedlog.md and previously-dropped items stay as history.
 func (m *Manager) DeleteTask(ctx context.Context, taskID string) error {
+	return m.DeleteTaskWithReason(ctx, taskID, "")
+}
+
+// DeleteTaskWithReason is DeleteTask with an optional short reason recorded
+// in the dropped.md entry.
+func (m *Manager) DeleteTaskWithReason(ctx context.Context, taskID, reason string) error {
 	t, err := m.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
 	}
 	if t.SourceFile != "backlog.md" {
-		return fmt.Errorf("task %s lives in %s; only backlog.md items can be deleted", taskID, t.SourceFile)
+		return fmt.Errorf("task %s lives in %s; only backlog.md items can be dropped", taskID, t.SourceFile)
 	}
 	proj, err := m.Store.GetProject(ctx, t.ProjectID)
 	if err != nil {
 		return err
 	}
 	backlogPath := filepath.Join(proj.Path, "backlog.md")
-	content, err := os.ReadFile(backlogPath)
+	droppedPath := filepath.Join(proj.Path, "dropped.md")
+
+	backlogContent, err := os.ReadFile(backlogPath)
 	if err != nil {
 		return err
 	}
-	tasks := backlog.ParseFile(string(content))
-	newContent := backlog.RemoveTasksByIDs(string(content), tasks, map[string]bool{taskID: true})
-	if string(newContent) == string(content) {
-		return nil // no-op (nothing matched)
-	}
-	if err := m.writeSuppressed(backlogPath, []byte(newContent)); err != nil {
+	tasks := backlog.ParseFile(string(backlogContent))
+
+	// Step 1: append the task to dropped.md (newest-first). Dedupe by id.
+	droppedContent, err := readOrEmpty(droppedPath)
+	if err != nil {
 		return err
 	}
+	newDropped := backlog.PrependDropped(droppedContent, backlog.DroppedInput{
+		ID: t.ID, Title: t.Title, Priority: t.Priority, Category: t.Category,
+		DroppedAt: time.Now().UTC().Format("2006-01-02 15:04"),
+		Reason:    reason,
+	})
+	if newDropped != droppedContent {
+		if err := m.writeSuppressed(droppedPath, []byte(newDropped)); err != nil {
+			return err
+		}
+	}
+
+	// Step 2: strip the task from backlog.md.
+	newBacklog := backlog.RemoveTasksByIDs(string(backlogContent), tasks, map[string]bool{taskID: true})
+	if string(newBacklog) != string(backlogContent) {
+		if err := m.writeSuppressed(backlogPath, []byte(newBacklog)); err != nil {
+			return err
+		}
+	}
+
+	// Step 3: Rescan to reconcile the DB (drop the row from backlog.md;
+	// re-add from dropped.md with status="dropped").
 	if _, err := m.Rescan(ctx, proj.ID); err != nil {
 		return err
 	}
-	_ = m.Store.InsertEvent(ctx, proj.ID, "", "task.deleted",
-		map[string]any{"id": taskID, "title": t.Title})
+	_ = m.Store.InsertEvent(ctx, proj.ID, "", "task.dropped",
+		map[string]any{"id": taskID, "title": t.Title, "reason": reason})
 	return nil
 }
 
@@ -425,12 +457,17 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 	}
 	backlogPath := filepath.Join(proj.Path, "backlog.md")
 	completedPath := filepath.Join(proj.Path, "completedlog.md")
+	droppedPath := filepath.Join(proj.Path, "dropped.md")
 
 	backlogContent, err := readOrEmpty(backlogPath)
 	if err != nil {
 		return nil, err
 	}
 	completedContent, err := readOrEmpty(completedPath)
+	if err != nil {
+		return nil, err
+	}
+	droppedContent, err := readOrEmpty(droppedPath)
 	if err != nil {
 		return nil, err
 	}
@@ -507,15 +544,17 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 		}
 	}
 
-	// ---- Parse completedlog.md; merge into store view ----
+	// ---- Parse completedlog.md + dropped.md; merge into store view ----
 	completedTasks := backlog.ParseFile(completedContent)
+	droppedTasks := backlog.ParseFile(droppedContent)
 
-	storeTasks := make([]store.Task, 0, len(backlogTasks)+len(completedTasks))
+	storeTasks := make([]store.Task, 0, len(backlogTasks)+len(completedTasks)+len(droppedTasks))
 	for _, t := range backlogTasks {
 		storeTasks = append(storeTasks, toStoreTask(t, proj.ID, "backlog.md"))
 	}
-	// Dedupe: if a completedlog entry has the same id as a backlog entry
-	// (weird, but possible if the user manually re-added), backlog wins.
+	// Dedupe: backlog wins over completedlog wins over dropped. If the user
+	// pulled a task back from dropped.md into backlog.md (or from
+	// completedlog.md), the active row is authoritative.
 	seen := map[string]bool{}
 	for _, t := range storeTasks {
 		seen[t.ID] = true
@@ -525,6 +564,18 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 			continue
 		}
 		storeTasks = append(storeTasks, toStoreTask(t, proj.ID, "completedlog.md"))
+		seen[t.ID] = true
+	}
+	for _, t := range droppedTasks {
+		if seen[t.ID] {
+			continue
+		}
+		// Force status=dropped so downstream queries can filter cleanly even
+		// if someone hand-edited the checkbox marker.
+		st := toStoreTask(t, proj.ID, "dropped.md")
+		st.Status = store.TaskDropped
+		storeTasks = append(storeTasks, st)
+		seen[t.ID] = true
 	}
 	if err := m.Store.UpsertTasks(ctx, proj.ID, storeTasks); err != nil {
 		return nil, err
@@ -532,6 +583,7 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 	// Return combined for callers that care about count.
 	all := append([]backlog.Task{}, backlogTasks...)
 	all = append(all, completedTasks...)
+	all = append(all, droppedTasks...)
 	return all, nil
 }
 

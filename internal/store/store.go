@@ -223,6 +223,7 @@ const (
 	TaskBlocked  TaskStatus = "blocked"
 	TaskDeferred TaskStatus = "deferred"
 	TaskDone     TaskStatus = "done"
+	TaskDropped  TaskStatus = "dropped"
 )
 
 // Task is the persisted row.

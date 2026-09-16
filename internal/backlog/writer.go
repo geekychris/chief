@@ -356,3 +356,85 @@ func renderCompletionLine(in CompletionInput) string {
 	line += " (done " + in.DoneAt + ")"
 	return line
 }
+
+// DroppedInput mirrors CompletionInput. Kept as a separate type so future
+// dropped-specific fields (e.g., reason) can be added without breaking
+// callers of PrependCompletion.
+type DroppedInput struct {
+	ID        string
+	Title     string
+	Priority  int
+	Category  string
+	DroppedAt string
+	Reason    string
+}
+
+// PrependDropped inserts a `- [!]` line at the top of dropped.md, under a
+// `# Dropped` header (created if missing). Newest-first ordering. Dedupes
+// by task id — a second call with the same ID is a no-op.
+func PrependDropped(content string, in DroppedInput) string {
+	if in.ID == "" || in.Title == "" || in.DroppedAt == "" {
+		return content
+	}
+	if HasTaskID(content, in.ID) {
+		return content
+	}
+	line := renderDroppedLine(in)
+	sep := "\n"
+	if strings.Contains(content, "\r\n") {
+		sep = "\r\n"
+	}
+	if strings.TrimSpace(content) == "" {
+		return "# Dropped" + sep + sep + line + sep
+	}
+	lines := strings.Split(strings.TrimRight(content, "\r\n"), sep)
+	insertAt := -1
+	for i, ln := range lines {
+		if m := headerRE.FindStringSubmatch(ln); m != nil {
+			if len(m[1]) == 1 && strings.EqualFold(strings.TrimSpace(m[2]), "Dropped") {
+				insertAt = i + 1
+				if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) == "" {
+					insertAt++
+				}
+				break
+			}
+		}
+	}
+	if insertAt < 0 {
+		newContent := "# Dropped" + sep + sep + line + sep + sep + strings.TrimLeft(content, "\r\n")
+		if !strings.HasSuffix(newContent, sep) {
+			newContent += sep
+		}
+		return newContent
+	}
+	before := lines[:insertAt]
+	after := lines[insertAt:]
+	newLines := append([]string{}, before...)
+	newLines = append(newLines, line)
+	newLines = append(newLines, after...)
+	joined := strings.Join(newLines, sep)
+	if !strings.HasSuffix(joined, sep) {
+		joined += sep
+	}
+	return joined
+}
+
+func renderDroppedLine(in DroppedInput) string {
+	var tags []string
+	if in.Priority != 0 {
+		tags = append(tags, fmt.Sprintf("[priority:%d]", in.Priority))
+	}
+	if in.Category != "" {
+		tags = append(tags, fmt.Sprintf("[category:%s]", in.Category))
+	}
+	line := fmt.Sprintf("- [!] {id:%s} %s", in.ID, strings.TrimSpace(in.Title))
+	if len(tags) > 0 {
+		line += " " + strings.Join(tags, " ")
+	}
+	if in.Reason != "" {
+		line += " (dropped " + in.DroppedAt + ": " + in.Reason + ")"
+	} else {
+		line += " (dropped " + in.DroppedAt + ")"
+	}
+	return line
+}

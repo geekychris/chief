@@ -1,5 +1,3 @@
-- [ ] {id:7257} Chief self-inject demo — respond with exactly the string CHIEF-DEMO-OK on its own line, then briefly (one sentence) confirm you received this via cmux send. Do NOT modify any files. [priority:1]
-
 ## Backlog
 
 ## Chief-internal
