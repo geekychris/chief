@@ -110,6 +110,38 @@ type TaskAddResponse struct {
 	Task store.Task `json:"task"`
 }
 
+// ---------- task.update ----------
+
+// TaskUpdateRequest updates a task's checkbox-line fields in backlog.md.
+// UpdateBody must be explicitly set to have Body applied — nil pointer =
+// "don't touch body". Send empty string with UpdateBody=true to clear.
+type TaskUpdateRequest struct {
+	TaskID            string   `json:"task_id"`
+	Title             string   `json:"title"`
+	Priority          int      `json:"priority,omitempty"`
+	Category          string   `json:"category,omitempty"`
+	RequiredResources []string `json:"required_resources,omitempty"`
+	Due               string   `json:"due,omitempty"`
+	UpdateBody        bool     `json:"update_body,omitempty"`
+	Body              string   `json:"body,omitempty"`
+}
+
+type TaskUpdateResponse struct {
+	Task store.Task `json:"task"`
+}
+
+// ---------- task.reorder ----------
+
+type TaskReorderRequest struct {
+	TaskID    string `json:"task_id"`
+	Direction string `json:"direction"` // "up" | "down"
+}
+
+type TaskReorderResponse struct {
+	Task    store.Task `json:"task"`
+	Applied bool       `json:"applied"` // false = no-op (task already at edge of its section)
+}
+
 // ---------- analyzer.install ----------
 
 // AnalyzerInstallRequest kicks off the analyzer install (clone + go build).

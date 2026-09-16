@@ -223,6 +223,8 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("backlog.list", handleBacklogList(st))
 	s.Register("task.show", handleTaskShow(st))
 	s.Register("task.add", handleTaskAdd(mgr))
+	s.Register("task.update", handleTaskUpdate(mgr))
+	s.Register("task.reorder", handleTaskReorder(mgr))
 
 	// cmux integration (Feature B — send task to a running Claude pane).
 	// The cmux socket enforces access control; chiefd (not spawned inside
@@ -504,6 +506,53 @@ func handleTaskAdd(mgr *project.Manager) ipc.Handler {
 			return nil, err
 		}
 		return methods.TaskAddResponse{Task: t}, nil
+	}
+}
+
+func handleTaskUpdate(mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.TaskUpdateRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.TaskID == "" || req.Title == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "task_id and title required"}
+		}
+		opts := project.UpdateTaskOpts{
+			Title: req.Title, Priority: req.Priority, Category: req.Category,
+			RequiredResources: req.RequiredResources, Due: req.Due,
+		}
+		if req.UpdateBody {
+			b := req.Body
+			opts.Body = &b
+		}
+		t, err := mgr.UpdateTask(context.Background(), req.TaskID, opts)
+		if err != nil {
+			return nil, err
+		}
+		return methods.TaskUpdateResponse{Task: t}, nil
+	}
+}
+
+func handleTaskReorder(mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.TaskReorderRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.TaskID == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "task_id required"}
+		}
+		before, err := mgr.Store.GetTask(context.Background(), req.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		after, err := mgr.MoveTask(context.Background(), req.TaskID, req.Direction)
+		if err != nil {
+			return nil, err
+		}
+		applied := before.SourceLine != after.SourceLine
+		return methods.TaskReorderResponse{Task: after, Applied: applied}, nil
 	}
 }
 

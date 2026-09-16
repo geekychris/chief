@@ -4,7 +4,8 @@ import './app.css';
 import {
   Ping, ListProjects, ListBacklog, GetTask,
   AddProject, RescanProject, ReadProjectFile,
-  AddTask, CmuxCandidates, CmuxBind, SendTask,
+  AddTask, UpdateTask, ReorderTask,
+  CmuxCandidates, CmuxBind, SendTask,
   GetProjectSessions, RevealInFinder, OpenPath, OpenURL,
   OpenClaudeTrace, OpenClaudeTraceForProject,
   InstallAnalyzer,
@@ -15,7 +16,7 @@ import {
 const state = {
   projects: [],          // ProjectSummary[]
   selectedProject: '',   // '' = All backlogs
-  statusFilter: 'pending',
+  statusFilter: '',      // '' = all — completed rows inline styled distinctly
   tasks: [],             // BacklogRow[]
   selectedTaskId: '',
 };
@@ -44,6 +45,7 @@ const els = {
   detailBody: $('detail-body'),
   detailClose: $('detail-close'),
   btnSendCmux: $('btn-send-cmux'),
+  btnEditTask: $('btn-edit-task'),
   // Modal: add-task
   modalAdd: $('modal-add'),
   addTitle: $('add-title'),
@@ -52,6 +54,15 @@ const els = {
   addBody: $('add-body'),
   btnAddSave: $('btn-add-save'),
   btnAddCancel: $('btn-add-cancel'),
+  // Modal: edit-task
+  modalEdit: $('modal-edit'),
+  editId: $('edit-id'),
+  editTitle: $('edit-title'),
+  editCategory: $('edit-category'),
+  editPriority: $('edit-priority'),
+  editBody: $('edit-body'),
+  btnEditSave: $('btn-edit-save'),
+  btnEditCancel: $('btn-edit-cancel'),
   // Modal: cmux picker
   modalCmux: $('modal-cmux'),
   cmuxMatches: $('cmux-matches'),
@@ -92,8 +103,11 @@ els.detailClose.addEventListener('click', () => {
   renderBacklog();
 });
 els.btnSendCmux.addEventListener('click', () => sendCurrentTaskToCmux());
+els.btnEditTask.addEventListener('click', openEditTaskModal);
 els.btnAddSave.addEventListener('click', submitAddTask);
 els.btnAddCancel.addEventListener('click', () => els.modalAdd.classList.add('hidden'));
+els.btnEditSave.addEventListener('click', submitEditTask);
+els.btnEditCancel.addEventListener('click', () => els.modalEdit.classList.add('hidden'));
 els.btnCmuxCancel.addEventListener('click', () => els.modalCmux.classList.add('hidden'));
 els.btnOpenTrace.addEventListener('click', openTraceForCurrentProject);
 els.btnOpenSessionsDir.addEventListener('click', () => {
@@ -500,13 +514,31 @@ function renderSidebar() {
 
 function renderBacklog() {
   if (!state.tasks || state.tasks.length === 0) {
-    els.backlogBody.innerHTML = `<tr><td colspan="6" class="empty">no tasks match</td></tr>`;
+    els.backlogBody.innerHTML = `<tr><td colspan="7" class="empty">no tasks match</td></tr>`;
     return;
   }
-  els.backlogBody.innerHTML = state.tasks.map(t => {
+  // Reorder controls only make sense within a single project and only for
+  // non-done items in backlog.md. Precompute per-project neighbours so
+  // ↑/↓ can be disabled at section edges.
+  const projectView = !!state.selectedProject;
+  els.backlogBody.innerHTML = state.tasks.map((t, i) => {
     const glyph = statusGlyph(t.status);
     const sel = t.id === state.selectedTaskId ? ' selected' : '';
     const titleTruncated = t.title.length > 80 ? t.title.slice(0, 77) + '…' : t.title;
+    const showReorder = projectView && t.status !== 'done' && t.source_file === 'backlog.md';
+    let reorderHTML = '';
+    if (showReorder) {
+      // Disable buttons at obvious edges (first / last row of the section).
+      // Server also enforces (returns applied=false); this is UX polish.
+      const prev = state.tasks[i - 1];
+      const next = state.tasks[i + 1];
+      const canUp   = !!prev && prev.status === t.status && (prev.category || '') === (t.category || '') && prev.source_file === 'backlog.md';
+      const canDown = !!next && next.status === t.status && (next.category || '') === (t.category || '') && next.source_file === 'backlog.md';
+      reorderHTML = `
+        <button class="btn-up"   data-id="${escapeHtml(t.id)}" ${canUp   ? '' : 'disabled'} title="Move up">↑</button>
+        <button class="btn-down" data-id="${escapeHtml(t.id)}" ${canDown ? '' : 'disabled'} title="Move down">↓</button>
+      `;
+    }
     return `
       <tr class="${sel}" data-id="${escapeHtml(t.id)}">
         <td class="col-status st-${t.status}">${glyph}</td>
@@ -515,12 +547,72 @@ function renderBacklog() {
         <td class="col-project">${escapeHtml(t.project_name || '')}</td>
         <td class="col-category">${escapeHtml(t.category || '')}</td>
         <td class="col-title">${escapeHtml(titleTruncated)}</td>
+        <td class="col-reorder">${reorderHTML}</td>
       </tr>
     `;
   }).join('');
+  // Row click → detail. Ignore clicks that originated on the reorder buttons
+  // (they have their own handlers below).
   els.backlogBody.querySelectorAll('tr').forEach(tr => {
-    tr.addEventListener('click', () => showTaskDetail(tr.dataset.id));
+    tr.addEventListener('click', (ev) => {
+      if (ev.target.closest('.col-reorder')) return;
+      showTaskDetail(tr.dataset.id);
+    });
   });
+  els.backlogBody.querySelectorAll('button.btn-up').forEach(b => {
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); reorderTask(b.dataset.id, 'up'); });
+  });
+  els.backlogBody.querySelectorAll('button.btn-down').forEach(b => {
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); reorderTask(b.dataset.id, 'down'); });
+  });
+}
+
+async function reorderTask(taskId, direction) {
+  try {
+    await ReorderTask(taskId, direction);
+    await refreshAll();
+  } catch (e) {
+    console.error('reorder failed', e);
+  }
+}
+
+// -------- edit task modal --------
+
+function openEditTaskModal() {
+  if (!state.selectedTaskId) return;
+  const t = state.tasks.find(x => x.id === state.selectedTaskId);
+  if (!t) return;
+  if (t.source_file !== 'backlog.md') {
+    alert("Only backlog.md items are editable in place — completed items live in completedlog.md and should be edited manually.");
+    return;
+  }
+  els.editId.textContent = t.id;
+  els.editTitle.value = t.title || '';
+  els.editCategory.value = t.category || '';
+  els.editPriority.value = String(t.priority || 0);
+  els.editBody.value = t.body || '';
+  els.modalEdit.classList.remove('hidden');
+  setTimeout(() => els.editTitle.focus(), 30);
+}
+
+async function submitEditTask() {
+  const taskId = els.editId.textContent;
+  const title = els.editTitle.value.trim();
+  if (!title) { els.editTitle.focus(); return; }
+  const category = els.editCategory.value.trim();
+  const priority = parseInt(els.editPriority.value, 10) || 0;
+  const body = els.editBody.value;
+  try {
+    await UpdateTask(taskId, title, body, category, priority, true);
+    els.modalEdit.classList.add('hidden');
+    await refreshAll();
+    // Re-open the detail drawer so the change is immediately visible.
+    if (state.selectedTaskId === taskId) {
+      await showTaskDetail(taskId);
+    }
+  } catch (e) {
+    alert('Update failed: ' + (e.message || e));
+  }
 }
 
 function statusGlyph(s) {

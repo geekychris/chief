@@ -119,6 +119,26 @@ select { background: var(--bg-elev); color: var(--text); border: 1px solid var(-
 .col-project { width: 140px; }
 .col-category { width: 120px; color: var(--text-dim); }
 .col-title { }
+.col-reorder { width: 54px; text-align: right; white-space: nowrap; }
+.col-reorder button {
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 1;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+.col-reorder button:hover { color: var(--text); background: var(--bg-elev-2); border-color: var(--border); }
+.col-reorder button:disabled { color: #444; cursor: default; background: transparent; }
+.task-id-chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 1px 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--accent-2);
+}
 .empty { text-align: center; color: var(--text-dim); padding: 20px !important; }
 
 .st-pending { color: var(--text-dim); }

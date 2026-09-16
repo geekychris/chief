@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/geekychris/chief/internal/backlog"
@@ -262,6 +263,104 @@ func (m *Manager) AddTask(ctx context.Context, projectID string, opts AddTaskOpt
 	return t, nil
 }
 
+// UpdateTaskOpts is what UpdateTask consumes; nil Body pointer means "don't
+// touch body", *"" means "clear body", *"foo" means "replace body with foo".
+type UpdateTaskOpts struct {
+	Title             string
+	Priority          int
+	Category          string
+	RequiredResources []string
+	Due               string
+	Body              *string
+}
+
+// UpdateTask rewrites a task's checkbox line in backlog.md (title, priority,
+// category, resources, due) and optionally its body. Preserves the original
+// checkbox character. Triggers a rescan afterwards so the store reflects.
+func (m *Manager) UpdateTask(ctx context.Context, taskID string, opts UpdateTaskOpts) (store.Task, error) {
+	if strings.TrimSpace(opts.Title) == "" {
+		return store.Task{}, errors.New("title required")
+	}
+	t, err := m.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return store.Task{}, err
+	}
+	proj, err := m.Store.GetProject(ctx, t.ProjectID)
+	if err != nil {
+		return store.Task{}, err
+	}
+	// UpdateTask only applies to backlog.md items. Done items live in
+	// completedlog.md and are historical; edits there should be manual.
+	if t.SourceFile != "backlog.md" {
+		return store.Task{}, fmt.Errorf("task %s lives in %s; only backlog.md items are editable", taskID, t.SourceFile)
+	}
+	backlogPath := filepath.Join(proj.Path, "backlog.md")
+	content, err := os.ReadFile(backlogPath)
+	if err != nil {
+		return store.Task{}, fmt.Errorf("read %s: %w", backlogPath, err)
+	}
+	tasks := backlog.ParseFile(string(content))
+	newContent, err := backlog.UpdateTask(string(content), tasks, backlog.UpdateTaskInput{
+		ID: taskID, Title: opts.Title, Priority: opts.Priority,
+		Category: opts.Category, RequiredResources: opts.RequiredResources,
+		Due: opts.Due, Body: opts.Body,
+	})
+	if err != nil {
+		return store.Task{}, err
+	}
+	if err := m.writeSuppressed(backlogPath, []byte(newContent)); err != nil {
+		return store.Task{}, err
+	}
+	if _, err := m.Rescan(ctx, proj.ID); err != nil {
+		return store.Task{}, err
+	}
+	_ = m.Store.InsertEvent(ctx, proj.ID, "", "task.updated",
+		map[string]any{"id": taskID, "title": opts.Title})
+	return m.Store.GetTask(ctx, taskID)
+}
+
+// MoveTask swaps the given task's block with its adjacent same-section
+// sibling. Direction is "up" or "down". Silent no-op when the task is at
+// the edge of its section (blocked by an H1/H2/H3 header).
+func (m *Manager) MoveTask(ctx context.Context, taskID, direction string) (store.Task, error) {
+	if direction != "up" && direction != "down" {
+		return store.Task{}, fmt.Errorf("direction must be up or down (got %q)", direction)
+	}
+	t, err := m.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return store.Task{}, err
+	}
+	if t.SourceFile != "backlog.md" {
+		return store.Task{}, fmt.Errorf("task %s lives in %s; only backlog.md items are reorderable", taskID, t.SourceFile)
+	}
+	proj, err := m.Store.GetProject(ctx, t.ProjectID)
+	if err != nil {
+		return store.Task{}, err
+	}
+	backlogPath := filepath.Join(proj.Path, "backlog.md")
+	content, err := os.ReadFile(backlogPath)
+	if err != nil {
+		return store.Task{}, err
+	}
+	tasks := backlog.ParseFile(string(content))
+	newContent, err := backlog.MoveTask(string(content), tasks, taskID, direction)
+	if err != nil {
+		return store.Task{}, err
+	}
+	if string(newContent) == string(content) {
+		return t, nil // no-op (edge of section)
+	}
+	if err := m.writeSuppressed(backlogPath, []byte(newContent)); err != nil {
+		return store.Task{}, err
+	}
+	if _, err := m.Rescan(ctx, proj.ID); err != nil {
+		return store.Task{}, err
+	}
+	_ = m.Store.InsertEvent(ctx, proj.ID, "", "task.moved",
+		map[string]any{"id": taskID, "direction": direction})
+	return m.Store.GetTask(ctx, taskID)
+}
+
 // Remove deletes the project row (cascading tasks). Leaves .chief/ on disk
 // so registration state is preserved; the caller can also delete the dir.
 func (m *Manager) Remove(ctx context.Context, idOrPath string) error {
@@ -429,6 +528,7 @@ func toStoreTask(t backlog.Task, projectID, sourceFile string) store.Task {
 		Body:              t.Body,
 		SourceFile:        sourceFile,
 		SourceLineHash:    backlog.LineHash(t.RawLine),
+		SourceLine:        t.LineNum,
 		Status:            store.TaskStatus(t.Status),
 		Priority:          t.Priority,
 		Category:          t.Category,

@@ -26,7 +26,7 @@ var schemaSQL string
 
 // currentSchemaVersion is the PRAGMA user_version we expect after migrations.
 // Bump this and add a branch in migrate() when the schema changes.
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // Store wraps *sql.DB and provides typed DAO methods.
 type Store struct {
@@ -74,16 +74,31 @@ func (s *Store) migrate(ctx context.Context) error {
 	if v >= currentSchemaVersion {
 		return nil
 	}
-	// M1 has a single migration: apply schema.sql and set user_version=1.
-	// Future migrations should branch on v and apply diffs in order.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("apply schema: %w", err)
+
+	// v0 → v1: initial schema. schema.sql uses CREATE TABLE IF NOT EXISTS
+	// so it's safe to apply on both fresh and pre-existing DBs.
+	if v < 1 {
+		if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
+			return fmt.Errorf("apply v1 schema: %w", err)
+		}
 	}
+	// v1 → v2: add tasks.source_line so the UI can sort by doc order (what
+	// the user sees when editing backlog.md), not by created_at.  Doubles
+	// as the anchor for reorder operations.
+	if v < 2 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN source_line INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("apply v2 (source_line): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS tasks_project_order ON tasks(project_id, source_line)`); err != nil {
+			return fmt.Errorf("apply v2 (index): %w", err)
+		}
+	}
+
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
 		return fmt.Errorf("bump user_version: %w", err)
 	}
@@ -218,6 +233,7 @@ type Task struct {
 	Body              string     `json:"body,omitempty"`
 	SourceFile        string     `json:"source_file"`
 	SourceLineHash    string     `json:"source_line_hash"`
+	SourceLine        int        `json:"source_line"` // 1-based line of the checkbox in SourceFile
 	Status            TaskStatus `json:"status"`
 	Priority          int        `json:"priority"`
 	Category          string     `json:"category,omitempty"`
@@ -278,10 +294,10 @@ func (s *Store) UpsertTasks(ctx context.Context, projectID string, desired []Tas
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE tasks
 				   SET title = ?, body = ?, source_file = ?, source_line_hash = ?,
-				       status = ?, priority = ?, category = ?, required_resources = ?,
-				       due = ?, completed_at = ?
+				       source_line = ?, status = ?, priority = ?, category = ?,
+				       required_resources = ?, due = ?, completed_at = ?
 				 WHERE id = ? AND project_id = ?`,
-				t.Title, t.Body, t.SourceFile, t.SourceLineHash,
+				t.Title, t.Body, t.SourceFile, t.SourceLineHash, t.SourceLine,
 				string(t.Status), t.Priority, t.Category, string(resJSON),
 				t.Due, completedAt, t.ID, projectID,
 			); err != nil {
@@ -290,11 +306,11 @@ func (s *Store) UpsertTasks(ctx context.Context, projectID string, desired []Tas
 		} else {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO tasks(id, project_id, title, body, source_file, source_line_hash,
-				                  status, priority, category, required_resources, due,
+				                  source_line, status, priority, category, required_resources, due,
 				                  created_at, completed_at)
-				VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				t.ID, projectID, t.Title, t.Body, t.SourceFile, t.SourceLineHash,
-				string(t.Status), t.Priority, t.Category, string(resJSON),
+				t.SourceLine, string(t.Status), t.Priority, t.Category, string(resJSON),
 				t.Due, t.CreatedAt.Format(time.RFC3339), completedAt,
 			); err != nil {
 				return fmt.Errorf("insert task %s: %w", t.ID, err)
@@ -331,7 +347,7 @@ type TaskFilter struct {
 func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 	q := `
 		SELECT t.id, t.project_id, t.title, t.body, t.source_file, t.source_line_hash,
-		       t.status, t.priority, t.category, t.required_resources, t.due,
+		       t.source_line, t.status, t.priority, t.category, t.required_resources, t.due,
 		       t.claimed_at, t.claimed_by_session, t.revive_count,
 		       t.created_at, t.completed_at
 		  FROM tasks t
@@ -346,7 +362,10 @@ func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 		q += " AND t.status = ?"
 		args = append(args, string(f.Status))
 	}
-	q += ` ORDER BY p.name, t.priority DESC, t.created_at ASC`
+	// Sort: non-done first (pending/active/blocked/deferred), then done;
+	// within each group, by project name then doc order (source_line). This
+	// keeps completed items visually last while still inline in the table.
+	q += ` ORDER BY (t.status = 'done'), p.name, t.source_line ASC, t.created_at ASC`
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -368,7 +387,7 @@ func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, project_id, title, body, source_file, source_line_hash,
-		       status, priority, category, required_resources, due,
+		       source_line, status, priority, category, required_resources, due,
 		       claimed_at, claimed_by_session, revive_count,
 		       created_at, completed_at
 		  FROM tasks WHERE id = ?`, id)
@@ -400,7 +419,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 	var status string
 	if err := scan(
 		&t.ID, &t.ProjectID, &t.Title, &t.Body, &t.SourceFile, &t.SourceLineHash,
-		&status, &t.Priority, &t.Category, &resJSON, &due,
+		&t.SourceLine, &status, &t.Priority, &t.Category, &resJSON, &due,
 		&claimedAt, &claimedBy, &t.ReviveCount,
 		&createdAt, &completedAt,
 	); err != nil {

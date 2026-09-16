@@ -32,8 +32,8 @@
           <button id="btn-add-task" class="hidden" title="Append a new task to this project's backlog.md">+ Add task</button>
           <label>Status:</label>
           <select id="status-filter">
-            <option value="">all</option>
-            <option value="pending" selected>pending</option>
+            <option value="" selected>all</option>
+            <option value="pending">pending</option>
             <option value="active">active</option>
             <option value="blocked">blocked</option>
             <option value="deferred">deferred</option>
@@ -52,10 +52,11 @@
               <th class="col-project">Project</th>
               <th class="col-category">Category</th>
               <th class="col-title">Title</th>
+              <th class="col-reorder"></th>
             </tr>
           </thead>
           <tbody id="backlog-body">
-            <tr><td colspan="6" class="empty">Loading…</td></tr>
+            <tr><td colspan="7" class="empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -109,6 +110,7 @@
       </div>
       <div class="detail-body" id="detail-body"></div>
       <div class="detail-actions">
+        <button id="btn-edit-task" title="Edit this task in backlog.md">Edit</button>
         <button id="btn-send-cmux" title="Inject a prompt into this project's cmux Claude">Send to cmux Claude</button>
       </div>
     </aside>
@@ -125,6 +127,21 @@
       <div class="modal-actions">
         <button id="btn-add-cancel">Cancel</button>
         <button id="btn-add-save" class="primary">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: edit task -->
+  <div id="modal-edit" class="modal hidden">
+    <div class="modal-card">
+      <h2>Edit task <code id="edit-id" class="task-id-chip"></code></h2>
+      <div class="modal-row"><label>Title</label><input id="edit-title" type="text"/></div>
+      <div class="modal-row"><label>Category</label><input id="edit-category" type="text" placeholder="(section header)"/></div>
+      <div class="modal-row"><label>Priority</label><input id="edit-priority" type="number" min="-9" max="9"/></div>
+      <div class="modal-row"><label>Body</label><textarea id="edit-body" rows="4" placeholder="(indented sub-bullets in backlog.md; clear to remove)"></textarea></div>
+      <div class="modal-actions">
+        <button id="btn-edit-cancel">Cancel</button>
+        <button id="btn-edit-save" class="primary">Save changes</button>
       </div>
     </div>
   </div>

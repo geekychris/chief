@@ -161,6 +161,42 @@ func (a *App) AddTask(projectID, title, body, category string, priority int, res
 	return resp, nil
 }
 
+// UpdateTask rewrites a task's checkbox line (title, priority, category) in
+// backlog.md. Body is applied only when updateBody is true (empty string then
+// clears the body; non-empty replaces it).
+func (a *App) UpdateTask(taskID, title, body, category string, priority int, updateBody bool) (methods.TaskUpdateResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.TaskUpdateResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.TaskUpdateResponse
+	req := methods.TaskUpdateRequest{
+		TaskID: taskID, Title: title, Priority: priority,
+		Category: category, UpdateBody: updateBody, Body: body,
+	}
+	if err := c.Call("task.update", req, &resp); err != nil {
+		return methods.TaskUpdateResponse{}, err
+	}
+	return resp, nil
+}
+
+// ReorderTask swaps a task with its adjacent same-section sibling.
+// direction: "up" | "down". No-op if the task is at the edge of its section.
+func (a *App) ReorderTask(taskID, direction string) (methods.TaskReorderResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.TaskReorderResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.TaskReorderResponse
+	req := methods.TaskReorderRequest{TaskID: taskID, Direction: direction}
+	if err := c.Call("task.reorder", req, &resp); err != nil {
+		return methods.TaskReorderResponse{}, err
+	}
+	return resp, nil
+}
+
 // CmuxCandidates returns candidate cmux surfaces for a project (cwd matches
 // filtered to Claude sessions) plus the full surface list for a manual override.
 func (a *App) CmuxCandidates(projectID string) (methods.CmuxCandidatesResponse, error) {
