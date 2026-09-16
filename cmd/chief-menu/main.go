@@ -218,13 +218,24 @@ func refresh() {
 	mTotals.SetTitle(fmt.Sprintf("%d project(s) · %d pending · %d deferred",
 		len(projs), totalPending, totalDeferred))
 
-	// Menu bar title: glyph + total pending as a mini badge.
+	// Menu bar title: glyph + total pending as a mini badge. Attention
+	// flags (chief_flag_for_human + next-task suggestions) are shown as a
+	// separate '!' badge so a user with pending flags but zero pending
+	// tasks still sees a signal.
+	openFlags, _ := callFlagCount()
 	badge := ""
 	if totalPending > 0 {
 		badge = fmt.Sprintf(" %d", totalPending)
 	}
+	if openFlags > 0 {
+		badge += fmt.Sprintf(" !%d", openFlags)
+	}
 	systray.SetTitle("♦" + badge)
-	systray.SetTooltip(fmt.Sprintf("Chief — %d pending across %d project(s)", totalPending, len(projs)))
+	tip := fmt.Sprintf("Chief — %d pending across %d project(s)", totalPending, len(projs))
+	if openFlags > 0 {
+		tip += fmt.Sprintf(" · %d attention flag(s)", openFlags)
+	}
+	systray.SetTooltip(tip)
 
 	// Fill slots.
 	slotsMu.Lock()
@@ -301,6 +312,22 @@ func callProjectList() ([]methods.ProjectSummary, error) {
 		return nil, err
 	}
 	return resp.Projects, nil
+}
+
+// callFlagCount asks chiefd for the number of unresolved attention flags
+// across every project. Best-effort — errors return zero so the menu-bar
+// UI degrades cleanly if chiefd is an older build without the endpoint.
+func callFlagCount() (int, error) {
+	c, err := dial()
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	var resp methods.FlagCountResponse
+	if err := c.Call("flag.count", methods.FlagCountRequest{}, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Open, nil
 }
 
 func callRescan(idOrPath string) error {

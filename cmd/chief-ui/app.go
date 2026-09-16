@@ -537,6 +537,99 @@ func (a *App) ReadProjectFile(projectID, filename string) (string, error) {
 	return string(b), nil
 }
 
+// ---------- flags (attention inbox) ----------
+
+// ListFlags returns attention flags across projects. openOnly filters to
+// unresolved; empty projectID = all projects.
+func (a *App) ListFlags(projectID string, openOnly bool) ([]methods.FlagRow, error) {
+	c, err := a.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	var resp methods.FlagListResponse
+	req := methods.FlagListRequest{ProjectID: projectID, OpenOnly: openOnly}
+	if err := c.Call("flag.list", req, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Flags, nil
+}
+
+// CountOpenFlags returns the number of unresolved flags. Powers the toolbar badge.
+func (a *App) CountOpenFlags() (int, error) {
+	c, err := a.dial()
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	var resp methods.FlagCountResponse
+	if err := c.Call("flag.count", methods.FlagCountRequest{}, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Open, nil
+}
+
+// AnswerFlag resolves a flag with a reply. Resolution defaults to "answered".
+func (a *App) AnswerFlag(flagID, reply, resolution string) (methods.FlagRow, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.FlagRow{}, err
+	}
+	defer c.Close()
+	var resp methods.FlagAnswerResponse
+	if err := c.Call("flag.answer", methods.FlagAnswerRequest{
+		FlagID: flagID, Reply: reply, Resolution: resolution,
+	}, &resp); err != nil {
+		return methods.FlagRow{}, err
+	}
+	return resp.Flag, nil
+}
+
+// ApproveNextTask acks a next-task flag AND injects the suggested task
+// into the project's bound cmux surface.
+func (a *App) ApproveNextTask(flagID string) (methods.NextApproveResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.NextApproveResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.NextApproveResponse
+	if err := c.Call("next.approve", methods.NextApproveRequest{FlagID: flagID}, &resp); err != nil {
+		return methods.NextApproveResponse{}, err
+	}
+	return resp, nil
+}
+
+// SkipNextTask acks a next-task flag with resolution=skipped.
+func (a *App) SkipNextTask(flagID, reason string) (methods.NextSkipResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.NextSkipResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.NextSkipResponse
+	if err := c.Call("next.skip", methods.NextSkipRequest{FlagID: flagID, Reason: reason}, &resp); err != nil {
+		return methods.NextSkipResponse{}, err
+	}
+	return resp, nil
+}
+
+// SnoozeNextTask holds off notifications for a project (or by flag) for N minutes.
+func (a *App) SnoozeNextTask(flagID, project string, minutes int) (methods.NextSnoozeResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.NextSnoozeResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.NextSnoozeResponse
+	if err := c.Call("next.snooze", methods.NextSnoozeRequest{
+		FlagID: flagID, Project: project, Minutes: minutes,
+	}, &resp); err != nil {
+		return methods.NextSnoozeResponse{}, err
+	}
+	return resp, nil
+}
+
 // ---------- helpers ----------
 
 func (a *App) dial() (*ipc.Client, error) {

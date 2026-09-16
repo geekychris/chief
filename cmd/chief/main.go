@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -33,6 +34,10 @@ func main() {
 		projectCmd(),
 		backlogCmd(),
 		taskCmd(),
+		flagCmd(),
+		inboxCmd(),
+		answerCmd(),
+		nextCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -320,6 +325,254 @@ func taskShowCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
+}
+
+// ---------- flag / inbox / answer / next ----------
+//
+// The attention pipeline. `chief flag` is what a Claude session (or a human)
+// invokes to raise a question; `chief inbox` and `chief answer` are how the
+// user reads and resolves them; `chief next-*` handles the completion-follow-up
+// notifications chiefd raises when tasks transition to done.
+//
+// MCP wrappers around these RPCs are deferred to M2 — for now, sessions call
+// them via Bash. The IPC contract is the source of truth.
+
+func flagCmd() *cobra.Command {
+	var project, session, urgency, kind, suggested string
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "flag <question>",
+		Short: "Raise an attention flag for the human. Optionally scoped to a project.",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			question := strings.Join(args, " ")
+			if project == "" {
+				// Fall back to cwd. If cwd isn't a registered project, chiefd
+				// will surface a not-found error the user can act on.
+				p, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				project = p
+			}
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.FlagRaiseResponse
+			if err := c.Call("flag.raise", methods.FlagRaiseRequest{
+				ProjectID:   project,
+				SessionID:   session,
+				Kind:        kind,
+				Urgency:     urgency,
+				Question:    question,
+				SuggestedID: suggested,
+			}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			hint := ""
+			switch {
+			case resp.SnoozedProject:
+				hint = " (snoozed — no notification)"
+			case resp.RateLimited:
+				hint = " (rate-limited — no notification)"
+			case resp.Coalesced:
+				hint = " (coalesced into existing flag)"
+			case resp.NotifiedMacOS:
+				hint = " (macOS notification sent)"
+			}
+			fmt.Printf("flag %s raised for %s%s\n", resp.Flag.ID, resp.Flag.ProjectName, hint)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "project id/name/path (default: cwd)")
+	cmd.Flags().StringVar(&session, "session", "", "session id (optional)")
+	cmd.Flags().StringVar(&urgency, "urgency", "attention", "info|attention|urgent")
+	cmd.Flags().StringVar(&kind, "kind", "question", "question|next_task")
+	cmd.Flags().StringVar(&suggested, "suggested-id", "", "for kind=next_task: task id being suggested")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
+}
+
+func inboxCmd() *cobra.Command {
+	var project string
+	var all, jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "inbox",
+		Short: "List unresolved attention flags (default: all projects, open only)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.FlagListResponse
+			if err := c.Call("flag.list", methods.FlagListRequest{
+				ProjectID: project, OpenOnly: !all,
+			}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			if len(resp.Flags) == 0 {
+				fmt.Println("no attention flags")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "ID\tPROJECT\tURGENCY\tKIND\tAGE\tSTATE\tQUESTION")
+			now := time.Now()
+			for _, f := range resp.Flags {
+				age := now.Sub(f.CreatedAt).Round(time.Second).String()
+				state := "open"
+				if f.AckAt != nil {
+					state = string(f.Resolution)
+					if state == "" {
+						state = "ack"
+					}
+				}
+				q := f.Question
+				if len(q) > 60 {
+					q = q[:57] + "..."
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					f.ID, f.ProjectName, f.Urgency, f.Kind, age, state, q)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "filter to one project (id/name/path)")
+	cmd.Flags().BoolVar(&all, "all", false, "include resolved flags")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
+}
+
+func answerCmd() *cobra.Command {
+	var resolution string
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "answer <flag-id> <reply text...>",
+		Short: "Answer an attention flag (marks it resolved).",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flagID := args[0]
+			reply := strings.Join(args[1:], " ")
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.FlagAnswerResponse
+			if err := c.Call("flag.answer", methods.FlagAnswerRequest{
+				FlagID: flagID, Reply: reply, Resolution: resolution,
+			}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			fmt.Printf("flag %s answered (%s)\n", resp.Flag.ID, resp.Flag.Resolution)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&resolution, "resolution", "answered", "answered|approved|skipped|snoozed|dismissed")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
+}
+
+func nextCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "next",
+		Short: "Act on a chief-issued next-task suggestion (approve/skip/snooze).",
+	}
+	cmd.AddCommand(nextApproveCmd(), nextSkipCmd(), nextSnoozeCmd())
+	return cmd
+}
+
+func nextApproveCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "approve <flag-id>",
+		Short: "Approve the suggested next task — pokes the project's Claude session.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.NextApproveResponse
+			if err := c.Call("next.approve", methods.NextApproveRequest{FlagID: args[0]}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			fmt.Printf("approved — sent task to surface %s\n", resp.SurfaceRef)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
+}
+
+func nextSkipCmd() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "skip <flag-id>",
+		Short: "Skip the suggested next task (marks the flag resolved, leaves the task pending).",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.NextSkipResponse
+			if err := c.Call("next.skip", methods.NextSkipRequest{FlagID: args[0], Reason: reason}, &resp); err != nil {
+				return err
+			}
+			fmt.Printf("skipped flag %s\n", resp.Flag.ID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "reason for skipping (recorded in ack_reply)")
+	return cmd
+}
+
+func nextSnoozeCmd() *cobra.Command {
+	var flagID, project string
+	var minutes int
+	cmd := &cobra.Command{
+		Use:   "snooze",
+		Short: "Suppress next-task notifications for a project. Requires --minutes plus --flag or --project.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if minutes <= 0 {
+				return errors.New("--minutes > 0 required")
+			}
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.NextSnoozeResponse
+			if err := c.Call("next.snooze", methods.NextSnoozeRequest{
+				FlagID: flagID, Project: project, Minutes: minutes,
+			}, &resp); err != nil {
+				return err
+			}
+			fmt.Printf("snoozed project %s until %s\n", resp.ProjectID, resp.UntilRFC3339)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&flagID, "flag", "", "flag id to snooze (also acks the flag)")
+	cmd.Flags().StringVar(&project, "project", "", "project id/name/path to snooze")
+	cmd.Flags().IntVar(&minutes, "minutes", 0, "duration in minutes")
 	return cmd
 }
 

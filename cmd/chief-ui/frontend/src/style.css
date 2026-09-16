@@ -392,3 +392,71 @@ button.danger:hover { background: var(--bad); color: #14141a; }
   overflow-y: auto;
   margin: 0;
 }
+
+/* ---- Attention inbox ---- */
+#btn-inbox { position: relative; }
+.inbox-badge {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 5px;
+  margin-left: 6px;
+  border-radius: 8px;
+  background: var(--bad);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  vertical-align: middle;
+}
+.inbox-count-label { color: var(--text-dim); font-size: 12px; font-weight: 400; margin-left: 6px; }
+.inbox-list {
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 6px;
+}
+.inbox-list .empty {
+  color: var(--text-dim);
+  text-align: center;
+  padding: 24px 12px;
+}
+.flag-card {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--bg-elev);
+}
+.flag-card.urgency-urgent { border-left: 3px solid var(--bad); }
+.flag-card.urgency-attention { border-left: 3px solid var(--warn); }
+.flag-card.urgency-info { border-left: 3px solid var(--text-dim); }
+.flag-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.flag-project { color: var(--accent-2); font-weight: 600; }
+.flag-body { font-size: 13px; margin-bottom: 8px; white-space: pre-wrap; }
+.flag-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.flag-actions input[type=text] {
+  flex: 1;
+  min-width: 180px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.flag-actions button.primary { background: var(--accent-2); color: #0a0a10; border-color: var(--accent-2); font-weight: 600; }

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekychris/chief/internal/attention"
 	"github.com/geekychris/chief/internal/backlog"
 	"github.com/geekychris/chief/internal/store"
 	"gopkg.in/yaml.v3"
@@ -56,6 +57,11 @@ type EchoSuppressor interface {
 type Manager struct {
 	Store    *store.Store
 	Watcher  EchoSuppressor
+	// Attention is optional. When wired, Rescan raises a "next task"
+	// suggestion flag whenever a task transitions from pending/active
+	// into done. Leaving it nil disables the suggestion notification
+	// (existing tests + tools that don't want side channels stay pure).
+	Attention *attention.Manager
 }
 
 // New returns a Manager bound to the given store. The watcher is optional;
@@ -502,6 +508,16 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 		backlogTasks = backlog.ParseFile(backlogContent)
 	}
 
+	// Capture pre-rescan status by id so we can tell "genuine completion"
+	// (pending/active → done) from "already-done rows we saw last time" on
+	// boot. This gates the next-task suggestion in the Attention hook below.
+	priorStatus := map[string]store.TaskStatus{}
+	if existing, err := m.Store.ListTasks(ctx, store.TaskFilter{ProjectID: proj.ID}); err == nil {
+		for _, t := range existing {
+			priorStatus[t.ID] = t.Status
+		}
+	}
+
 	// ---- Sweep [x] items from backlog.md into completedlog.md ----
 	doneIDs := map[string]bool{}
 	sweptTasks := []backlog.Task{}
@@ -580,11 +596,62 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 	if err := m.Store.UpsertTasks(ctx, proj.ID, storeTasks); err != nil {
 		return nil, err
 	}
+
+	// Next-task suggestion. Fires when a task genuinely transitioned from
+	// pending/active into done (not on boot for pre-existing done rows).
+	// Only one flag per rescan even if several tasks completed — the
+	// attention manager's aggregation coalesces duplicates anyway, but
+	// picking the highest-priority "just done" as the anchor gives the
+	// notification a specific completion title.
+	if m.Attention != nil && len(doneIDs) > 0 {
+		var anchor *backlog.Task
+		for i := range sweptTasks {
+			t := &sweptTasks[i]
+			prev := priorStatus[t.ID]
+			if prev != "" && prev != store.TaskDone {
+				if anchor == nil || t.Priority > anchor.Priority {
+					anchor = t
+				}
+			}
+		}
+		if anchor != nil {
+			// Pick the top pending task (already sorted by source_line in ListTasks).
+			pending, err := m.Store.ListTasks(ctx, store.TaskFilter{
+				ProjectID: proj.ID, Status: store.TaskPending,
+			})
+			if err == nil && len(pending) > 0 {
+				next := pickNextSuggestion(pending)
+				body := fmt.Sprintf("Just finished '%s'. Suggested next: '%s' (id:%s).",
+					anchor.Title, next.Title, next.ID)
+				_, _ = m.Attention.Raise(ctx, attention.RaiseOpts{
+					ProjectID:   proj.ID,
+					Kind:        store.FlagKindNextTask,
+					Urgency:     store.UrgencyAttention,
+					Question:    body,
+					SuggestedID: next.ID,
+				})
+			}
+		}
+	}
+
 	// Return combined for callers that care about count.
 	all := append([]backlog.Task{}, backlogTasks...)
 	all = append(all, completedTasks...)
 	all = append(all, droppedTasks...)
 	return all, nil
+}
+
+// pickNextSuggestion returns the top-priority pending task from a list
+// already ordered by priority DESC, source_line ASC (as ListTasks does).
+// Kept as a separate function so unit tests can pin down the tie-break.
+func pickNextSuggestion(pending []store.Task) store.Task {
+	best := pending[0]
+	for _, t := range pending[1:] {
+		if t.Priority > best.Priority {
+			best = t
+		}
+	}
+	return best
 }
 
 // readOrEmpty reads a file, treating missing files as an empty string. Any

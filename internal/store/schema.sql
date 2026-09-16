@@ -46,3 +46,29 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_ts         ON events(ts);
 CREATE INDEX IF NOT EXISTS events_project_ts ON events(project_id, ts);
+
+-- Attention flags: questions/prompts a session raises for the human.
+-- Two flavors distinguished by `kind`:
+--   'question'    — Claude asked me something (chief_flag_for_human).
+--   'next_task'   — Chief-generated suggestion after a completion.
+-- `agg_key` groups near-duplicates within the rate-limit window so we can
+-- collapse "3 new questions in Project X" into a single notification.
+-- `ack_at` NULL means unresolved; ack_reply carries the human's answer.
+CREATE TABLE IF NOT EXISTS flags (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id    TEXT,
+    kind          TEXT NOT NULL DEFAULT 'question',       -- question|next_task
+    urgency       TEXT NOT NULL DEFAULT 'attention',      -- info|attention|urgent
+    question      TEXT NOT NULL DEFAULT '',
+    suggested_id  TEXT,                                   -- populated for kind=next_task
+    agg_key       TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    ack_at        TEXT,
+    ack_reply     TEXT NOT NULL DEFAULT '',
+    resolution    TEXT NOT NULL DEFAULT ''                -- answered|approved|skipped|snoozed|dismissed
+);
+CREATE INDEX IF NOT EXISTS flags_open_by_urgency
+    ON flags(ack_at, urgency, created_at);
+CREATE INDEX IF NOT EXISTS flags_project_open
+    ON flags(project_id, ack_at);

@@ -26,7 +26,7 @@ var schemaSQL string
 
 // currentSchemaVersion is the PRAGMA user_version we expect after migrations.
 // Bump this and add a branch in migrate() when the schema changes.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // Store wraps *sql.DB and provides typed DAO methods.
 type Store struct {
@@ -96,6 +96,34 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS tasks_project_order ON tasks(project_id, source_line)`); err != nil {
 			return fmt.Errorf("apply v2 (index): %w", err)
+		}
+	}
+
+	// v2 → v3: attention flags table. Pre-existing DBs don't have the table
+	// yet; schema.sql now creates it (IF NOT EXISTS is safe).
+	if v < 3 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS flags (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id    TEXT,
+    kind          TEXT NOT NULL DEFAULT 'question',
+    urgency       TEXT NOT NULL DEFAULT 'attention',
+    question      TEXT NOT NULL DEFAULT '',
+    suggested_id  TEXT,
+    agg_key       TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    ack_at        TEXT,
+    ack_reply     TEXT NOT NULL DEFAULT '',
+    resolution    TEXT NOT NULL DEFAULT ''
+)`); err != nil {
+			return fmt.Errorf("apply v3 (flags): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS flags_open_by_urgency ON flags(ack_at, urgency, created_at)`); err != nil {
+			return fmt.Errorf("apply v3 (flags_open_by_urgency): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS flags_project_open ON flags(project_id, ack_at)`); err != nil {
+			return fmt.Errorf("apply v3 (flags_project_open): %w", err)
 		}
 	}
 
@@ -481,6 +509,264 @@ func (s *Store) InsertEvent(ctx context.Context, projectID, sessionID, kind stri
 		time.Now().UTC().Format(time.RFC3339Nano), pid, sid, kind, string(raw),
 	)
 	return err
+}
+
+// ---------- Flags DAO ----------
+
+// FlagKind values persisted in flags.kind.
+type FlagKind string
+
+const (
+	FlagKindQuestion FlagKind = "question"  // Claude asked the human something
+	FlagKindNextTask FlagKind = "next_task" // Chief suggests the next backlog item
+)
+
+// FlagUrgency values persisted in flags.urgency. Matches the three-tier
+// notification model used by the notify package.
+type FlagUrgency string
+
+const (
+	UrgencyInfo      FlagUrgency = "info"      // badge only, no notification
+	UrgencyAttention FlagUrgency = "attention" // macOS notification
+	UrgencyUrgent    FlagUrgency = "urgent"    // notification + push (later)
+)
+
+// FlagResolution captures how a flag was ack'd. Empty until ack_at is set.
+type FlagResolution string
+
+const (
+	ResolutionAnswered  FlagResolution = "answered"  // human replied via inbox
+	ResolutionApproved  FlagResolution = "approved"  // next_task: approve suggestion
+	ResolutionSkipped   FlagResolution = "skipped"   // next_task: skip (defer suggested)
+	ResolutionSnoozed   FlagResolution = "snoozed"   // next_task: hold off for N minutes
+	ResolutionDismissed FlagResolution = "dismissed" // manual dismiss w/o reply
+)
+
+// Flag is the persisted row.
+type Flag struct {
+	ID          string         `json:"id"`
+	ProjectID   string         `json:"project_id"`
+	SessionID   *string        `json:"session_id,omitempty"`
+	Kind        FlagKind       `json:"kind"`
+	Urgency     FlagUrgency    `json:"urgency"`
+	Question    string         `json:"question"`
+	SuggestedID *string        `json:"suggested_id,omitempty"`
+	AggKey      string         `json:"agg_key"`
+	CreatedAt   time.Time      `json:"created_at"`
+	AckAt       *time.Time     `json:"ack_at,omitempty"`
+	AckReply    string         `json:"ack_reply,omitempty"`
+	Resolution  FlagResolution `json:"resolution,omitempty"`
+}
+
+// InsertFlag creates a flag row. Caller supplies the id (typically minted by
+// NewFlagID). Returns ErrConflict if the id collides.
+func (s *Store) InsertFlag(ctx context.Context, f Flag) error {
+	if f.CreatedAt.IsZero() {
+		f.CreatedAt = time.Now().UTC()
+	}
+	if f.Kind == "" {
+		f.Kind = FlagKindQuestion
+	}
+	if f.Urgency == "" {
+		f.Urgency = UrgencyAttention
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO flags(id, project_id, session_id, kind, urgency, question,
+		                  suggested_id, agg_key, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.ID, f.ProjectID, sqlNull(f.SessionID), string(f.Kind), string(f.Urgency),
+		f.Question, sqlNull(f.SuggestedID), f.AggKey,
+		f.CreatedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil && isUniqueViolation(err) {
+		return fmt.Errorf("%w: flag id already exists", ErrConflict)
+	}
+	return err
+}
+
+// FlagFilter narrows a ListFlags query.
+type FlagFilter struct {
+	ProjectID string // empty = all projects
+	OpenOnly  bool   // true = ack_at IS NULL
+	Kind      FlagKind
+	Limit     int // 0 = no limit
+}
+
+// ListFlags returns flags matching the filter. Ordered by urgency
+// (urgent > attention > info) then age (oldest first), so the top of the
+// list is what the user should look at first.
+func (s *Store) ListFlags(ctx context.Context, f FlagFilter) ([]Flag, error) {
+	q := `
+		SELECT id, project_id, session_id, kind, urgency, question,
+		       suggested_id, agg_key, created_at, ack_at, ack_reply, resolution
+		  FROM flags WHERE 1=1`
+	var args []any
+	if f.ProjectID != "" {
+		q += " AND project_id = ?"
+		args = append(args, f.ProjectID)
+	}
+	if f.OpenOnly {
+		q += " AND ack_at IS NULL"
+	}
+	if f.Kind != "" {
+		q += " AND kind = ?"
+		args = append(args, string(f.Kind))
+	}
+	// urgency sort: urgent(0) < attention(1) < info(2). CASE expression so
+	// we don't have to store a numeric priority alongside the text label.
+	q += ` ORDER BY
+		CASE urgency
+			WHEN 'urgent'    THEN 0
+			WHEN 'attention' THEN 1
+			WHEN 'info'      THEN 2
+			ELSE 3
+		END ASC,
+		created_at ASC`
+	if f.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", f.Limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Flag
+	for rows.Next() {
+		fl, err := scanFlag(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fl)
+	}
+	return out, rows.Err()
+}
+
+// GetFlag returns one flag by id.
+func (s *Store) GetFlag(ctx context.Context, id string) (Flag, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, project_id, session_id, kind, urgency, question,
+		       suggested_id, agg_key, created_at, ack_at, ack_reply, resolution
+		  FROM flags WHERE id = ?`, id)
+	f, err := scanFlag(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Flag{}, ErrNotFound
+	}
+	return f, err
+}
+
+// AckFlag marks a flag resolved with the given reply text + resolution code.
+// Idempotent — re-ack'ing overwrites the previous ack (used when the user
+// changes their mind, e.g. answers a flag twice).
+func (s *Store) AckFlag(ctx context.Context, id, reply string, resolution FlagResolution) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE flags
+		   SET ack_at = ?, ack_reply = ?, resolution = ?
+		 WHERE id = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano), reply, string(resolution), id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// CountOpenFlags returns the number of unresolved flags. projectID="" for all.
+// The menu-bar badge polls this every few seconds.
+func (s *Store) CountOpenFlags(ctx context.Context, projectID string) (int, error) {
+	var n int
+	var err error
+	if projectID == "" {
+		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM flags WHERE ack_at IS NULL`).Scan(&n)
+	} else {
+		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM flags WHERE ack_at IS NULL AND project_id = ?`, projectID).Scan(&n)
+	}
+	return n, err
+}
+
+// FindOpenFlagByAggKey looks up an unresolved flag with a given agg_key so
+// notifications can be coalesced. Returns ErrNotFound if none.
+func (s *Store) FindOpenFlagByAggKey(ctx context.Context, projectID, aggKey string) (Flag, error) {
+	if aggKey == "" {
+		return Flag{}, ErrNotFound
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, project_id, session_id, kind, urgency, question,
+		       suggested_id, agg_key, created_at, ack_at, ack_reply, resolution
+		  FROM flags
+		 WHERE project_id = ? AND ack_at IS NULL AND agg_key = ?
+		 ORDER BY created_at ASC LIMIT 1`, projectID, aggKey)
+	f, err := scanFlag(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Flag{}, ErrNotFound
+	}
+	return f, err
+}
+
+// CountOpenFlagsSince counts open flags for a project created after `since`.
+// Used by the per-project rate limiter (attention pkg).
+func (s *Store) CountOpenFlagsSince(ctx context.Context, projectID string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM flags
+		 WHERE project_id = ? AND created_at >= ?`,
+		projectID, since.Format(time.RFC3339Nano),
+	).Scan(&n)
+	return n, err
+}
+
+func scanFlag(scan func(...any) error) (Flag, error) {
+	var f Flag
+	var sess, sug, ackAt sql.NullString
+	var createdAt string
+	var kind, urg, res string
+	if err := scan(
+		&f.ID, &f.ProjectID, &sess, &kind, &urg, &f.Question,
+		&sug, &f.AggKey, &createdAt, &ackAt, &f.AckReply, &res,
+	); err != nil {
+		return Flag{}, err
+	}
+	f.Kind = FlagKind(kind)
+	f.Urgency = FlagUrgency(urg)
+	f.Resolution = FlagResolution(res)
+	if sess.Valid {
+		v := sess.String
+		f.SessionID = &v
+	}
+	if sug.Valid {
+		v := sug.String
+		f.SuggestedID = &v
+	}
+	if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
+		f.CreatedAt = t
+	} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		f.CreatedAt = t
+	}
+	if ackAt.Valid {
+		if t, err := time.Parse(time.RFC3339Nano, ackAt.String); err == nil {
+			f.AckAt = &t
+		} else if t, err := time.Parse(time.RFC3339, ackAt.String); err == nil {
+			f.AckAt = &t
+		}
+	}
+	return f, nil
+}
+
+func sqlNull(s *string) any {
+	if s == nil {
+		return nil
+	}
+	return *s
+}
+
+// NewFlagID returns "flag_" + 6 random hex chars.
+func NewFlagID() string {
+	var b [3]byte
+	_, _ = rand.Read(b[:])
+	return "flag_" + hex.EncodeToString(b[:])
 }
 
 // ---------- ID helpers ----------

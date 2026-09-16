@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/geekychris/chief/internal/attention"
 	"github.com/geekychris/chief/internal/claudetrace"
 	"github.com/geekychris/chief/internal/cmux"
 	"github.com/geekychris/chief/internal/config"
@@ -37,6 +38,7 @@ import (
 	"github.com/geekychris/chief/internal/installer"
 	"github.com/geekychris/chief/internal/ipc"
 	"github.com/geekychris/chief/internal/methods"
+	"github.com/geekychris/chief/internal/notify"
 	"github.com/geekychris/chief/internal/project"
 	"github.com/geekychris/chief/internal/store"
 )
@@ -72,6 +74,15 @@ func run() error {
 	slog.Info("store opened", "path", dbPath)
 
 	mgr := project.New(st)
+
+	// Attention manager: writes flags to `flags` table + fires macOS
+	// notifications (osascript). Wired into project.Manager so the Rescan
+	// path can raise "next-task" suggestions when a task transitions to done.
+	att := &attention.Manager{
+		Store:    st,
+		Notifier: notify.New(),
+	}
+	mgr.Attention = att
 
 	// Handler for fswatch: whenever a tracked file settles in a project dir,
 	// call Rescan. The handler runs on the fswatch goroutine — Rescan is fast
@@ -135,7 +146,7 @@ func run() error {
 	}
 
 	srv := ipc.NewServer()
-	registerMethods(srv, st, mgr, watcher)
+	registerMethods(srv, st, mgr, watcher, att)
 
 	slog.Info("chiefd started", "socket", sockPath, "version", Version, "pid", os.Getpid())
 
@@ -217,7 +228,7 @@ func setupLogger() (*slog.Logger, func(), error) {
 
 // registerMethods wires the per-milestone method surface. Handlers close over
 // the store/manager/watcher via method-level factories to avoid globals.
-func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher) {
+func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager) {
 	s.Register("ping", handlePing)
 	s.Register("project.add", handleProjectAdd(st, mgr, w))
 	s.Register("project.list", handleProjectList(st))
@@ -254,6 +265,252 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("historyviewer.status", handleHistoryViewerStatus())
 	s.Register("historyviewer.install", handleHistoryViewerInstall())
 	s.Register("historyviewer.open", handleHistoryViewerOpen(mgr))
+
+	// Attention pipeline: raise/list/answer/count flags + next-task actions.
+	s.Register("flag.raise", handleFlagRaise(st, att))
+	s.Register("flag.list", handleFlagList(st))
+	s.Register("flag.answer", handleFlagAnswer(st, att))
+	s.Register("flag.count", handleFlagCount(st))
+	s.Register("next.approve", handleNextApprove(cmuxClient, mgr, st, att))
+	s.Register("next.skip", handleNextSkip(mgr, st, att))
+	s.Register("next.snooze", handleNextSnooze(st, att))
+}
+
+// ---------- flag / next handlers ----------
+
+// enrichFlag joins a flag row with the project name so the UI/CLI don't
+// need a second lookup per row.
+func enrichFlag(st *store.Store, f store.Flag) methods.FlagRow {
+	row := methods.FlagRow{Flag: f}
+	if p, err := st.GetProject(context.Background(), f.ProjectID); err == nil {
+		row.ProjectName = p.Name
+	}
+	return row
+}
+
+func handleFlagRaise(st *store.Store, att *attention.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.FlagRaiseRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.ProjectID == "" || req.Question == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "project_id and question required"}
+		}
+		ctx := context.Background()
+		// Resolve project by id/name/path so callers can use any identifier.
+		p, err := st.GetProject(ctx, req.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		res, err := att.Raise(ctx, attention.RaiseOpts{
+			ProjectID:   p.ID,
+			SessionID:   req.SessionID,
+			Kind:        store.FlagKind(req.Kind),
+			Urgency:     store.FlagUrgency(req.Urgency),
+			Question:    req.Question,
+			SuggestedID: req.SuggestedID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		_ = st.InsertEvent(ctx, p.ID, req.SessionID, "flag.raised", map[string]any{
+			"flag_id": res.Flag.ID, "urgency": res.Flag.Urgency, "coalesced": res.Coalesced,
+			"rate_limited": res.RateLimited, "snoozed": res.SnoozedProject,
+		})
+		return methods.FlagRaiseResponse{
+			Flag:           enrichFlag(st, res.Flag),
+			Coalesced:      res.Coalesced,
+			NotifiedMacOS:  res.NotifiedMacOS,
+			RateLimited:    res.RateLimited,
+			SnoozedProject: res.SnoozedProject,
+		}, nil
+	}
+}
+
+func handleFlagList(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.FlagListRequest
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &req); err != nil {
+				return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+			}
+		}
+		ctx := context.Background()
+		filter := store.FlagFilter{OpenOnly: req.OpenOnly, Kind: store.FlagKind(req.Kind), Limit: req.Limit}
+		if req.ProjectID != "" {
+			p, err := st.GetProject(ctx, req.ProjectID)
+			if err != nil {
+				return nil, err
+			}
+			filter.ProjectID = p.ID
+		}
+		flags, err := st.ListFlags(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]methods.FlagRow, 0, len(flags))
+		for _, f := range flags {
+			rows = append(rows, enrichFlag(st, f))
+		}
+		return methods.FlagListResponse{Flags: rows}, nil
+	}
+}
+
+func handleFlagAnswer(st *store.Store, att *attention.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.FlagAnswerRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.FlagID == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "flag_id required"}
+		}
+		ctx := context.Background()
+		res := store.FlagResolution(req.Resolution)
+		if res == "" {
+			res = store.ResolutionAnswered
+		}
+		f, err := att.Ack(ctx, req.FlagID, req.Reply, res)
+		if err != nil {
+			return nil, err
+		}
+		_ = st.InsertEvent(ctx, f.ProjectID, "", "flag.answered", map[string]any{
+			"flag_id": f.ID, "resolution": res,
+		})
+		return methods.FlagAnswerResponse{Flag: enrichFlag(st, f)}, nil
+	}
+}
+
+func handleFlagCount(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.FlagCountRequest
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &req)
+		}
+		ctx := context.Background()
+		pid := ""
+		if req.ProjectID != "" {
+			p, err := st.GetProject(ctx, req.ProjectID)
+			if err != nil {
+				return nil, err
+			}
+			pid = p.ID
+		}
+		n, err := st.CountOpenFlags(ctx, pid)
+		if err != nil {
+			return nil, err
+		}
+		return methods.FlagCountResponse{Open: n}, nil
+	}
+}
+
+func handleNextApprove(cc *cmux.Client, mgr *project.Manager, st *store.Store, att *attention.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.NextApproveRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.FlagID == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "flag_id required"}
+		}
+		ctx := context.Background()
+		f, err := st.GetFlag(ctx, req.FlagID)
+		if err != nil {
+			return nil, err
+		}
+		if f.Kind != store.FlagKindNextTask || f.SuggestedID == nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "flag is not a next-task suggestion"}
+		}
+		t, err := st.GetTask(ctx, *f.SuggestedID)
+		if err != nil {
+			return nil, err
+		}
+		// Reuse the existing task.send handler logic by inlining the send.
+		pf, _ := mgr.ReadYAML(ctx, t.ProjectID)
+		surfaceRef := pf.Cmux.SurfaceID
+		if surfaceRef == "" {
+			return nil, &ipc.RPCError{Code: methods.ErrCodeCmuxUnbound, Message: "no cmux surface bound for this project"}
+		}
+		prompt := renderTaskPrompt(t, "")
+		if err := cc.SendAndRun(ctx, surfaceRef, prompt); err != nil {
+			return nil, err
+		}
+		ackedFlag, err := att.Ack(ctx, f.ID, "", store.ResolutionApproved)
+		if err != nil {
+			return nil, err
+		}
+		_ = st.InsertEvent(ctx, t.ProjectID, "", "next.approved",
+			map[string]any{"flag_id": f.ID, "task_id": t.ID, "surface": surfaceRef})
+		return methods.NextApproveResponse{
+			Flag: enrichFlag(st, ackedFlag), SurfaceRef: surfaceRef, Prompt: prompt,
+		}, nil
+	}
+}
+
+func handleNextSkip(mgr *project.Manager, st *store.Store, att *attention.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.NextSkipRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.FlagID == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "flag_id required"}
+		}
+		ctx := context.Background()
+		f, err := st.GetFlag(ctx, req.FlagID)
+		if err != nil {
+			return nil, err
+		}
+		// Ack the flag; the suggested task itself is left pending (skip
+		// != defer). Deferring is a heavier operation the user can do
+		// through the normal task UI. Keeps this action reversible.
+		acked, err := att.Ack(ctx, f.ID, req.Reason, store.ResolutionSkipped)
+		if err != nil {
+			return nil, err
+		}
+		_ = st.InsertEvent(ctx, f.ProjectID, "", "next.skipped",
+			map[string]any{"flag_id": f.ID, "reason": req.Reason})
+		return methods.NextSkipResponse{Flag: enrichFlag(st, acked), Deferred: false}, nil
+	}
+}
+
+func handleNextSnooze(st *store.Store, att *attention.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.NextSnoozeRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.Minutes <= 0 {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "minutes must be > 0"}
+		}
+		ctx := context.Background()
+		var projectID string
+		var flagID string
+		switch {
+		case req.FlagID != "":
+			f, err := st.GetFlag(ctx, req.FlagID)
+			if err != nil {
+				return nil, err
+			}
+			projectID = f.ProjectID
+			flagID = f.ID
+			_, _ = att.Ack(ctx, f.ID, fmt.Sprintf("snoozed %d min", req.Minutes), store.ResolutionSnoozed)
+		case req.Project != "":
+			p, err := st.GetProject(ctx, req.Project)
+			if err != nil {
+				return nil, err
+			}
+			projectID = p.ID
+		default:
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "flag_id or project required"}
+		}
+		until := time.Now().UTC().Add(time.Duration(req.Minutes) * time.Minute)
+		att.Snooze(projectID, until)
+		_ = st.InsertEvent(ctx, projectID, "", "next.snoozed",
+			map[string]any{"flag_id": flagID, "until": until.Format(time.RFC3339)})
+		return methods.NextSnoozeResponse{UntilRFC3339: until.Format(time.RFC3339), ProjectID: projectID}, nil
+	}
 }
 
 // ---------- analyzer.install ----------

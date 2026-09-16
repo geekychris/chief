@@ -316,3 +316,97 @@ const ErrCodeCmuxUnbound = -33001
 // ErrCodeCmuxSurfaceGone is returned when the previously bound surface no
 // longer appears in `cmux list-panels`.
 const ErrCodeCmuxSurfaceGone = -33002
+
+// ---------- flag.raise / flag.list / flag.answer / flag.count ----------
+
+// FlagRaiseRequest raises an attention flag. Session is typically a Claude
+// session id; ProjectID is required (accepts id/path/name — resolved
+// server-side).
+type FlagRaiseRequest struct {
+	ProjectID string `json:"project_id"`
+	SessionID string `json:"session_id,omitempty"`
+	Kind      string `json:"kind,omitempty"`      // question|next_task; default question
+	Urgency   string `json:"urgency,omitempty"`   // info|attention|urgent; default attention
+	Question  string `json:"question"`
+	// SuggestedID is populated when kind=next_task — the task chief is
+	// suggesting the session pick up next.
+	SuggestedID string `json:"suggested_id,omitempty"`
+}
+
+type FlagRaiseResponse struct {
+	Flag           FlagRow `json:"flag"`
+	Coalesced      bool    `json:"coalesced"`
+	NotifiedMacOS  bool    `json:"notified_macos"`
+	RateLimited    bool    `json:"rate_limited"`
+	SnoozedProject bool    `json:"snoozed_project"`
+}
+
+// FlagRow is the wire form of store.Flag, joined with the project name so
+// the UI doesn't have to fan out a second lookup per row.
+type FlagRow struct {
+	store.Flag
+	ProjectName string `json:"project_name"`
+}
+
+type FlagListRequest struct {
+	ProjectID string `json:"project_id,omitempty"`
+	OpenOnly  bool   `json:"open_only,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type FlagListResponse struct {
+	Flags []FlagRow `json:"flags"`
+}
+
+type FlagAnswerRequest struct {
+	FlagID     string `json:"flag_id"`
+	Reply      string `json:"reply"`
+	Resolution string `json:"resolution,omitempty"` // default "answered"
+}
+
+type FlagAnswerResponse struct {
+	Flag FlagRow `json:"flag"`
+}
+
+type FlagCountRequest struct {
+	ProjectID string `json:"project_id,omitempty"`
+}
+type FlagCountResponse struct {
+	Open int `json:"open"`
+}
+
+// ---------- next.approve / next.skip / next.snooze ----------
+//
+// Companions to the FlagKindNextTask flow. All operate on a specific
+// next-task flag_id; ack the flag with the corresponding resolution and
+// (for approve) inject the suggested task into the project's cmux surface.
+
+type NextApproveRequest struct {
+	FlagID string `json:"flag_id"`
+}
+type NextApproveResponse struct {
+	Flag       FlagRow `json:"flag"`
+	SurfaceRef string  `json:"surface_ref"`
+	Prompt     string  `json:"prompt"`
+}
+
+type NextSkipRequest struct {
+	FlagID string `json:"flag_id"`
+	Reason string `json:"reason,omitempty"`
+}
+type NextSkipResponse struct {
+	Flag FlagRow `json:"flag"`
+	// Deferred true if the suggested task was moved to deferred status.
+	Deferred bool `json:"deferred"`
+}
+
+type NextSnoozeRequest struct {
+	FlagID  string `json:"flag_id,omitempty"`
+	Project string `json:"project,omitempty"` // if FlagID unset, snooze a whole project
+	Minutes int    `json:"minutes"`
+}
+type NextSnoozeResponse struct {
+	UntilRFC3339 string `json:"until"`
+	ProjectID    string `json:"project_id"`
+}

@@ -10,6 +10,8 @@ import {
   OpenClaudeTrace, OpenClaudeTraceForProject,
   InstallAnalyzer,
   HistoryViewerStatus, InstallHistoryViewer, OpenHistoryViewer,
+  ListFlags, CountOpenFlags, AnswerFlag,
+  ApproveNextTask, SkipNextTask, SnoozeNextTask,
 } from '../wailsjs/go/main/App';
 
 // -------- state --------
@@ -91,6 +93,13 @@ const els = {
   installTitle: $('install-title'),
   btnInstallStart: $('btn-install-start'),
   btnInstallClose: $('btn-install-close'),
+  // Attention inbox
+  btnInbox: $('btn-inbox'),
+  inboxBadge: $('inbox-badge'),
+  modalInbox: $('modal-inbox'),
+  inboxList: $('inbox-list'),
+  inboxCountLabel: $('inbox-count-label'),
+  btnInboxClose: $('btn-inbox-close'),
 };
 
 // Current sessions payload (set by loadProjectDocs).
@@ -127,6 +136,8 @@ els.btnOpenSessionsDir.addEventListener('click', () => {
 els.btnOpenHistory.addEventListener('click', openHistoryForCurrentProject);
 els.btnInstallStart.addEventListener('click', runAnalyzerInstall);
 els.btnInstallClose.addEventListener('click', () => els.modalInstall.classList.add('hidden'));
+els.btnInbox.addEventListener('click', openInbox);
+els.btnInboxClose.addEventListener('click', () => els.modalInbox.classList.add('hidden'));
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
     e.preventDefault();
@@ -148,7 +159,165 @@ refreshAll();
 // -------- actions --------
 
 async function refreshAll() {
-  await Promise.all([updateStatus(), loadProjects(), loadBacklog()]);
+  await Promise.all([updateStatus(), loadProjects(), loadBacklog(), refreshInboxBadge()]);
+}
+
+// ---- Attention inbox: badge, list, actions.
+// Kept isolated so it can be lifted to its own module later.
+
+async function refreshInboxBadge() {
+  try {
+    const n = await CountOpenFlags();
+    if (n > 0) {
+      els.inboxBadge.textContent = String(n);
+      els.inboxBadge.classList.remove('hidden');
+    } else {
+      els.inboxBadge.classList.add('hidden');
+    }
+    // Re-render the list if the modal is open so approvals from CLI/keyboard
+    // show up instantly rather than on next open.
+    if (!els.modalInbox.classList.contains('hidden')) {
+      renderInbox();
+    }
+  } catch (e) {
+    // chiefd down or method missing — silent (status bar already reflects it).
+  }
+}
+
+async function openInbox() {
+  els.modalInbox.classList.remove('hidden');
+  await renderInbox();
+}
+
+async function renderInbox() {
+  els.inboxList.innerHTML = '<div class="empty">Loading…</div>';
+  let flags = [];
+  try {
+    flags = await ListFlags('', true);
+  } catch (e) {
+    els.inboxList.innerHTML = `<div class="empty">error: ${e}</div>`;
+    return;
+  }
+  els.inboxCountLabel.textContent = flags.length === 0 ? '(nothing)' : `(${flags.length} open)`;
+  if (!flags || flags.length === 0) {
+    els.inboxList.innerHTML = '<div class="empty">Inbox zero. No unresolved attention flags.</div>';
+    return;
+  }
+  els.inboxList.innerHTML = '';
+  for (const f of flags) {
+    els.inboxList.appendChild(renderFlagCard(f));
+  }
+}
+
+function renderFlagCard(f) {
+  const card = document.createElement('div');
+  card.className = `flag-card urgency-${f.urgency || 'attention'}`;
+  card.dataset.flagId = f.id;
+
+  const head = document.createElement('div');
+  head.className = 'flag-head';
+  head.innerHTML =
+    `<span class="flag-project">${escapeHTML(f.project_name || '(unknown)')}</span>` +
+    `<span>${escapeHTML(f.urgency)} · ${escapeHTML(f.kind)} · ${relativeTime(f.created_at)}</span>`;
+  card.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'flag-body';
+  body.textContent = f.question || '(no text)';
+  card.appendChild(body);
+
+  const actions = document.createElement('div');
+  actions.className = 'flag-actions';
+
+  if (f.kind === 'next_task') {
+    // Approve/Skip/Snooze buttons for chief-suggested next tasks.
+    const approve = document.createElement('button');
+    approve.className = 'primary';
+    approve.textContent = 'Approve → send to cmux';
+    approve.title = 'Inject the suggested task into the project\'s Claude pane';
+    approve.addEventListener('click', () => actOnNext('approve', f.id));
+
+    const skip = document.createElement('button');
+    skip.textContent = 'Skip';
+    skip.addEventListener('click', () => actOnNext('skip', f.id));
+
+    const snoozeInput = document.createElement('input');
+    snoozeInput.type = 'text';
+    snoozeInput.placeholder = 'snooze mins (e.g. 30)';
+    snoozeInput.style.maxWidth = '160px';
+    const snoozeBtn = document.createElement('button');
+    snoozeBtn.textContent = 'Snooze';
+    snoozeBtn.addEventListener('click', () => {
+      const m = parseInt(snoozeInput.value, 10);
+      if (!m || m <= 0) { showToast('Enter minutes > 0', true); return; }
+      actOnNext('snooze', f.id, m);
+    });
+
+    actions.append(approve, skip, snoozeInput, snoozeBtn);
+  } else {
+    // Question flags: text reply → answer.
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Reply — press Enter or click Answer';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAnswer(f.id, input.value);
+    });
+    const ans = document.createElement('button');
+    ans.className = 'primary';
+    ans.textContent = 'Answer';
+    ans.addEventListener('click', () => submitAnswer(f.id, input.value));
+
+    const dismiss = document.createElement('button');
+    dismiss.textContent = 'Dismiss';
+    dismiss.title = 'Mark resolved without a reply';
+    dismiss.addEventListener('click', async () => {
+      try {
+        await AnswerFlag(f.id, '', 'dismissed');
+        showToast('Dismissed');
+        await refreshInboxBadge();
+      } catch (e) { showToast(String(e), true); }
+    });
+
+    actions.append(input, ans, dismiss);
+  }
+
+  card.appendChild(actions);
+  return card;
+}
+
+async function submitAnswer(flagID, reply) {
+  const text = (reply || '').trim();
+  if (!text) { showToast('Reply text required', true); return; }
+  try {
+    await AnswerFlag(flagID, text, 'answered');
+    showToast('Answered');
+    await refreshInboxBadge();
+  } catch (e) {
+    showToast(String(e), true);
+  }
+}
+
+async function actOnNext(kind, flagID, minutes = 0) {
+  try {
+    if (kind === 'approve') {
+      const r = await ApproveNextTask(flagID);
+      showToast(`Sent to ${r.surface_ref}`);
+    } else if (kind === 'skip') {
+      await SkipNextTask(flagID, '');
+      showToast('Skipped');
+    } else if (kind === 'snooze') {
+      const r = await SnoozeNextTask(flagID, '', minutes);
+      showToast(`Snoozed until ${new Date(r.until).toLocaleTimeString()}`);
+    }
+    await refreshInboxBadge();
+  } catch (e) {
+    showToast(String(e), true);
+  }
+}
+
+function escapeHTML(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 async function updateStatus() {

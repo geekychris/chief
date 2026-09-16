@@ -1,5 +1,10 @@
 # Completed
 
+- [x] {id:2c8f} "Next task" prompt when a session completes and backlog has more work [priority:5] [category:Attention & notifications] (done 2026-09-16 03:09)
+- [x] {id:7247} `chief_reply_to_flag` MCP tool for programmatic replies [priority:5] [category:Attention & notifications] (done 2026-09-16 03:09)
+- [x] {id:45e5} Unified "answer inbox" pane listing every awaiting question across all projects [priority:5] [category:Attention & notifications] (done 2026-09-16 03:09)
+- [x] {id:39ac} Deliver macOS notification when a session flags itself `awaiting_human` [priority:5] [category:Attention & notifications] (done 2026-09-16 03:09)
+- [x] {id:29b0} create a backlog list for chief features [category:Backlog] (done 2026-09-16 02:46)
 - [x] {id:2350} jumping to zhistory does not filter by project [category:Backlog] (done 2026-09-15)
 - [x] {id:8340} I want the ability to not just send to cmux claude but run it [category:Backlog] (done 2026-09-15)
 - [x] {id:c50a} update the zhistory tool to use wails [category:Backlog] (done 2026-09-15)
