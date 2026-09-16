@@ -47,6 +47,7 @@ func main() {
 		lintCmd(),
 		codegraphCmd(),
 		costCmd(),
+		syncCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -930,6 +931,123 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// syncCmd fronts the git-based machine-sync flow. push commits +
+// pushes chief-managed markdown; pull rebases + kicks a rescan;
+// status shows dirty state + ahead/behind counts.
+func syncCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Sync chief-managed files across machines via the project's git remote.",
+	}
+	cmd.AddCommand(syncStatusCmd(), syncPushCmd(), syncPullCmd())
+	return cmd
+}
+
+func syncStatusCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "status <project>",
+		Short: "Report git state (branch, ahead/behind, dirty chief-managed files).",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.SyncStatusResponse
+			if err := c.Call("sync.status", methods.SyncStatusRequest{IDOrPath: args[0]}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			if !resp.IsGitRepo {
+				fmt.Println("not a git repo — `git init` in the project first")
+				return nil
+			}
+			fmt.Printf("branch: %s\n", resp.Branch)
+			if resp.HasRemote {
+				fmt.Printf("remote: %s\n", resp.RemoteURL)
+				fmt.Printf("  %d commit(s) ahead, %d behind origin\n", resp.AheadCount, resp.BehindCount)
+			} else {
+				fmt.Println("no origin remote — add one with `git remote add origin <url>`")
+			}
+			if len(resp.DirtyFiles) == 0 {
+				fmt.Println("chief-managed files: clean")
+			} else {
+				fmt.Println("chief-managed files with uncommitted changes:")
+				for _, f := range resp.DirtyFiles {
+					fmt.Printf("  · %s\n", f)
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON")
+	return cmd
+}
+
+func syncPushCmd() *cobra.Command {
+	var msg string
+	cmd := &cobra.Command{
+		Use:   "push <project>",
+		Short: "Commit chief-managed dirty files and push to origin.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.SyncPushResponse
+			if err := c.Call("sync.push", methods.SyncPushRequest{
+				IDOrPath: args[0], Message: msg,
+			}, &resp); err != nil {
+				return err
+			}
+			fmt.Println(resp.Message)
+			if resp.Rejected {
+				return fmt.Errorf("push rejected — pull first")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&msg, "message", "m", "", "commit message (default: auto-generated)")
+	return cmd
+}
+
+func syncPullCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "pull <project>",
+		Short: "Fetch + rebase origin. Kicks a rescan on merge.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.SyncPullResponse
+			if err := c.Call("sync.pull", methods.SyncPullRequest{IDOrPath: args[0]}, &resp); err != nil {
+				return err
+			}
+			fmt.Println(resp.Message)
+			if len(resp.Conflicts) > 0 {
+				for _, f := range resp.Conflicts {
+					fmt.Printf("  conflict: %s\n", f)
+				}
+				return fmt.Errorf("resolve manually and re-run")
+			}
+			for _, f := range resp.MergedFiles {
+				fmt.Printf("  merged: %s\n", f)
+			}
+			return nil
+		},
+	}
+	return cmd
 }
 
 // costCmd shows token + USD usage rolled up from Claude session

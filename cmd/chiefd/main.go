@@ -48,6 +48,7 @@ import (
 	"github.com/geekychris/chief/internal/orchestrator"
 	"github.com/geekychris/chief/internal/project"
 	"github.com/geekychris/chief/internal/store"
+	chiefsync "github.com/geekychris/chief/internal/sync"
 )
 
 // Version is stamped at build time via -ldflags. Defaults to "dev".
@@ -378,6 +379,9 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("stats.summary", handleStatsSummary(st))
 	s.Register("stats.detailed", handleStatsDetailed(st))
 	s.Register("cost.report", handleCostReport(st))
+	s.Register("sync.status", handleSyncStatus(mgr))
+	s.Register("sync.push", handleSyncPush(mgr, att))
+	s.Register("sync.pull", handleSyncPull(mgr, att))
 	s.Register("search", handleSearch(st))
 	s.Register("outliers", handleOutliers(st))
 	s.Register("lint.run", handleLintRun(lint, st))
@@ -1556,6 +1560,110 @@ func handleBacklogNext(st *store.Store) ipc.Handler {
 			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
 		}
 		return methods.BacklogNextResponse{Tasks: rows}, nil
+	}
+}
+
+// ---------- sync.status / push / pull ----------
+
+func handleSyncStatus(mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.SyncStatusRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.IDOrPath == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "id_or_path required"}
+		}
+		ctx := context.Background()
+		p, err := mgr.Store.GetProject(ctx, req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		st, err := chiefsync.GetStatus(ctx, p.Path)
+		if err != nil {
+			return nil, err
+		}
+		return methods.SyncStatusResponse{
+			IsGitRepo: st.IsGitRepo, HasRemote: st.HasRemote,
+			Branch: st.Branch, RemoteURL: st.RemoteURL,
+			AheadCount: st.AheadCount, BehindCount: st.BehindCount,
+			DirtyFiles: st.DirtyFiles,
+		}, nil
+	}
+}
+
+func handleSyncPush(mgr *project.Manager, att *attention.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.SyncPushRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		ctx := context.Background()
+		p, err := mgr.Store.GetProject(ctx, req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		res, err := chiefsync.Push(ctx, p.Path, req.Message)
+		if err != nil {
+			return nil, err
+		}
+		if res.Rejected && att != nil {
+			_, _ = att.Raise(ctx, attention.RaiseOpts{
+				ProjectID: p.ID,
+				Kind:      store.FlagKindQuestion,
+				Urgency:   store.UrgencyInfo,
+				Question:  "chief sync push rejected: " + res.Message,
+			})
+		}
+		_ = mgr.Store.InsertEvent(ctx, p.ID, "", "sync.pushed", map[string]any{
+			"committed": res.Committed, "pushed": res.Pushed,
+			"commit_sha": res.CommitSha, "rejected": res.Rejected,
+		})
+		return methods.SyncPushResponse{
+			Committed: res.Committed, Pushed: res.Pushed,
+			CommitSha: res.CommitSha, Rejected: res.Rejected, Message: res.Message,
+		}, nil
+	}
+}
+
+func handleSyncPull(mgr *project.Manager, att *attention.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.SyncPullRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		ctx := context.Background()
+		p, err := mgr.Store.GetProject(ctx, req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		res, err := chiefsync.Pull(ctx, p.Path)
+		if err != nil {
+			return nil, err
+		}
+		if len(res.Conflicts) > 0 && att != nil {
+			_, _ = att.Raise(ctx, attention.RaiseOpts{
+				ProjectID: p.ID,
+				Kind:      store.FlagKindQuestion,
+				Urgency:   store.UrgencyInfo,
+				Question: fmt.Sprintf("chief sync pull conflicts in %d file(s): %s. Resolve with `git status` + `git rebase --continue`.",
+					len(res.Conflicts), strings.Join(res.Conflicts, ", ")),
+			})
+		}
+		// After a successful merge, kick a rescan so the new backlog
+		// state lands in SQLite immediately (fswatch would eventually
+		// notice but this is faster).
+		if res.Merged && len(res.MergedFiles) > 0 {
+			_, _ = mgr.Rescan(ctx, p.ID)
+		}
+		_ = mgr.Store.InsertEvent(ctx, p.ID, "", "sync.pulled", map[string]any{
+			"fetched": res.Fetched, "merged": res.Merged,
+			"merged_files": res.MergedFiles, "conflicts": res.Conflicts,
+		})
+		return methods.SyncPullResponse{
+			Fetched: res.Fetched, Merged: res.Merged,
+			Conflicts: res.Conflicts, MergedFiles: res.MergedFiles, Message: res.Message,
+		}, nil
 	}
 }
 

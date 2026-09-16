@@ -335,6 +335,44 @@ type HistoryViewerOpenResponse struct {
 	Mode      string `json:"mode"`                // "app" (native Wails window) | "web" (browser)
 }
 
+// ---------- sync.status / push / pull ----------
+
+type SyncStatusRequest struct {
+	IDOrPath string `json:"id_or_path"`
+}
+type SyncStatusResponse struct {
+	IsGitRepo   bool     `json:"is_git_repo"`
+	HasRemote   bool     `json:"has_remote"`
+	Branch      string   `json:"branch,omitempty"`
+	RemoteURL   string   `json:"remote_url,omitempty"`
+	AheadCount  int      `json:"ahead_count"`
+	BehindCount int      `json:"behind_count"`
+	DirtyFiles  []string `json:"dirty_files"`
+}
+
+type SyncPushRequest struct {
+	IDOrPath string `json:"id_or_path"`
+	Message  string `json:"message,omitempty"`
+}
+type SyncPushResponse struct {
+	Committed bool   `json:"committed"`
+	Pushed    bool   `json:"pushed"`
+	CommitSha string `json:"commit_sha,omitempty"`
+	Rejected  bool   `json:"rejected"`
+	Message   string `json:"message"`
+}
+
+type SyncPullRequest struct {
+	IDOrPath string `json:"id_or_path"`
+}
+type SyncPullResponse struct {
+	Fetched     bool     `json:"fetched"`
+	Merged      bool     `json:"merged"`
+	Conflicts   []string `json:"conflicts,omitempty"`
+	MergedFiles []string `json:"merged_files,omitempty"`
+	Message     string   `json:"message"`
+}
+
 // ---------- cost.report ----------
 
 // CostReportRequest asks for token+dollar usage summaries.

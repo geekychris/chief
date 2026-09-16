@@ -1,5 +1,6 @@
 # Completed
 
+- [x] {id:d00a} Sync between machines [category:Agentic ergonomics] (done 2026-09-16 05:10:39)
 - [x] {id:ce12} Per-project token / cost tracking [category:Multi-project coordination] (done 2026-09-16 05:05:36)
 - [x] {id:f06a} add support for code graph search [category:Backlog] (done 2026-09-16 04:49:55)
 - [x] {id:6db5} Analytics dashboard in the Wails UI [category:Operations logging & analytics] (done 2026-09-16 04:39:15)
