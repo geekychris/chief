@@ -49,6 +49,24 @@ type MessagingConfig struct {
 	Routing RoutingConfig `yaml:"routing,omitempty"`
 	// Digest: scheduled rollup notification.
 	Digest DigestConfig `yaml:"digest,omitempty"`
+	// Briefing: opinionated morning message with "top N tasks to focus
+	// on today". More prescriptive than Digest — see MorningBriefer.
+	Briefing BriefingConfig `yaml:"briefing,omitempty"`
+}
+
+// BriefingConfig configures the morning briefing (12da). Disabled by
+// default; set enabled=true + pick a schedule.
+type BriefingConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+	// Time to fire in local time, HH:MM. Default: "08:30".
+	At string `yaml:"at,omitempty"`
+	// Backends: which messaging backends to fan out to. Empty →
+	// falls back to routing rules for urgency=attention.
+	Backends []string `yaml:"backends,omitempty"`
+	// TopN: how many tasks to highlight. Default 3.
+	TopN int `yaml:"top_n,omitempty"`
+	// WindowHours: activity window for "recent completions". Default 24.
+	WindowHours int `yaml:"window_hours,omitempty"`
 }
 
 // DigestConfig configures the daily/weekly rollup notification.

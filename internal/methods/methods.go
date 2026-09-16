@@ -4,6 +4,8 @@
 package methods
 
 import (
+	"time"
+
 	"github.com/geekychris/chief/internal/store"
 )
 
@@ -445,6 +447,49 @@ type CodeGraphOpenResponse struct {
 	// no browser open needed); "web" = raw JAR + open URL in default
 	// browser (fallback when the .app isn't installed).
 	Mode string `json:"mode"`
+}
+
+// ---------- briefing.preview / briefing.fire ----------
+
+type BriefingPreviewRequest struct{}
+type BriefingPreviewResponse struct {
+	Body string `json:"body"`
+}
+
+type BriefingFireRequest struct{}
+type BriefingFireResponse struct {
+	Sent bool `json:"sent"`
+}
+
+// ---------- cmux.direct_send ----------
+
+// CmuxDirectSendRequest injects an arbitrary prompt into a project's
+// bound cmux surface — no task_id / renderTaskPrompt boilerplate. Used
+// by `chief run refresh` (and future automation) to nudge Claude
+// without the "please work on task X" wrapping.
+type CmuxDirectSendRequest struct {
+	IDOrPath string `json:"id_or_path"`
+	Prompt   string `json:"prompt"`
+}
+type CmuxDirectSendResponse struct {
+	SurfaceRef string `json:"surface_ref"`
+	Prompt     string `json:"prompt"`
+}
+
+// ---------- focus.enter ----------
+
+// FocusEnterRequest snoozes flags for every project except the focused
+// one, for the specified duration. Snooze cursor auto-expires per
+// project so no "focus.exit" call is required.
+type FocusEnterRequest struct {
+	IDOrPath string `json:"id_or_path"`
+	Minutes  int    `json:"minutes"`
+}
+type FocusEnterResponse struct {
+	FocusedProject string    `json:"focused_project"`
+	Minutes        int       `json:"minutes"`
+	SnoozedOthers  int       `json:"snoozed_others"`
+	Until          time.Time `json:"until"`
 }
 
 // ---------- logsearch.status / install / open ----------

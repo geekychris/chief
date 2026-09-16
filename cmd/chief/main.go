@@ -43,10 +43,12 @@ func main() {
 		statsCmd(),
 		searchCmd(),
 		digestCmd(),
+		briefingCmd(),
 		outliersCmd(),
 		lintCmd(),
 		codegraphCmd(),
 		logsearchCmd(),
+		runCmd(),
 		costCmd(),
 		syncCmd(),
 		constitutionCmd(),
@@ -1065,7 +1067,8 @@ func gatherConstitutionContext(projectPath string) (string, error) {
 		}
 	}
 	// Top-level listing (2 levels deep, skipping the usual noise).
-	fmt.Fprintln(&b, "## Top-level structure\n")
+	fmt.Fprintln(&b, "## Top-level structure")
+	fmt.Fprintln(&b)
 	entries, err := os.ReadDir(projectPath)
 	if err == nil {
 		for _, e := range entries {
@@ -1660,6 +1663,37 @@ func digestCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&send, "send", false, "actually dispatch via configured messaging backends")
 	cmd.Flags().IntVar(&windowHours, "window", 24, "hours to look back for velocity numbers")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
+}
+
+func briefingCmd() *cobra.Command {
+	var send bool
+	cmd := &cobra.Command{
+		Use:   "briefing",
+		Short: "Preview the morning briefing; --send to fire via configured backends.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			if send {
+				var resp methods.BriefingFireResponse
+				if err := c.Call("briefing.fire", methods.BriefingFireRequest{}, &resp); err != nil {
+					return err
+				}
+				fmt.Println("briefing fired")
+				return nil
+			}
+			var resp methods.BriefingPreviewResponse
+			if err := c.Call("briefing.preview", methods.BriefingPreviewRequest{}, &resp); err != nil {
+				return err
+			}
+			fmt.Println(resp.Body)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&send, "send", false, "actually dispatch via configured messaging backends")
 	return cmd
 }
 

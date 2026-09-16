@@ -41,6 +41,12 @@ type Rules struct {
 	Disable     bool           `yaml:"disable,omitempty"`
 	SweepHours  int            `yaml:"sweep_hours,omitempty"`
 	Forbidden   []ForbiddenRule `yaml:"forbidden,omitempty"`
+	// Watch is the URGENT-tier ruleset consumed by WatchSweeper (8db7).
+	// These fire in ~real time (30s cadence) and raise urgent-urgency
+	// flags. Meant for things you'd want to catch mid-turn, not
+	// end-of-day (rm -rf outside the project, force-push to main,
+	// curl to non-allowlisted hosts, etc.).
+	Watch       []ForbiddenRule `yaml:"watch,omitempty"`
 }
 
 // ForbiddenRule is one pattern + explanation.

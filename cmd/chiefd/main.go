@@ -279,8 +279,39 @@ func run() error {
 		lint.Run(ctx)
 	}()
 
+	// Watch sweeper (8db7): short-cadence (30s) tail of session jsonl
+	// for URGENT-tier tool_use patterns (rm -rf, force push, curl|sh,
+	// etc.). Uses built-in default patterns + any user `watch:` overlay
+	// from .chief/lint.yaml. Coalesced via attention agg-key.
+	sessionWatch := &orchestrator.WatchSweeper{Store: st, Attention: att}
+	sessionWatchDone := make(chan struct{})
+	go func() {
+		defer close(sessionWatchDone)
+		sessionWatch.Run(ctx)
+	}()
+
+	// Morning briefing (12da): opinionated "top N tasks to focus on
+	// today" pushed via messaging router at a scheduled time. Disabled
+	// by default; enable in config.yaml under messaging.briefing.
+	briefing := &orchestrator.MorningBriefer{
+		Store:    st,
+		Router:   router,
+		Enabled:  cfg.Messaging.Briefing.Enabled,
+		At:       cfg.Messaging.Briefing.At,
+		Backends: cfg.Messaging.Briefing.Backends,
+		TopN:     cfg.Messaging.Briefing.TopN,
+	}
+	if cfg.Messaging.Briefing.WindowHours > 0 {
+		briefing.Window = time.Duration(cfg.Messaging.Briefing.WindowHours) * time.Hour
+	}
+	briefingDone := make(chan struct{})
+	go func() {
+		defer close(briefingDone)
+		briefing.Run(ctx)
+	}()
+
 	srv := ipc.NewServer()
-	registerMethods(srv, st, mgr, watcher, att, cfg, digest, lint)
+	registerMethods(srv, st, mgr, watcher, att, cfg, digest, lint, briefing)
 
 	slog.Info("chiefd started", "socket", sockPath, "version", Version, "pid", os.Getpid())
 
@@ -317,6 +348,8 @@ func run() error {
 	<-retentionDone
 	<-digestDone
 	<-lintDone
+	<-sessionWatchDone
+	<-briefingDone
 	for _, done := range inboundDones {
 		<-done
 	}
@@ -369,7 +402,7 @@ func setupLogger() (*slog.Logger, func(), error) {
 
 // registerMethods wires the per-milestone method surface. Handlers close over
 // the store/manager/watcher via method-level factories to avoid globals.
-func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config, digest *orchestrator.DigestSweeper, lint *orchestrator.LintSweeper) {
+func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config, digest *orchestrator.DigestSweeper, lint *orchestrator.LintSweeper, briefing *orchestrator.MorningBriefer) {
 	s.Register("ping", handlePing)
 	s.Register("project.add", handleProjectAdd(st, mgr, w))
 	s.Register("project.list", handleProjectList(st))
@@ -388,6 +421,8 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("lint.run", handleLintRun(lint, st))
 	s.Register("digest.preview", handleDigestPreview(digest))
 	s.Register("digest.fire", handleDigestFire(digest))
+	s.Register("briefing.preview", handleBriefingPreview(briefing))
+	s.Register("briefing.fire", handleBriefingFire(briefing))
 	s.Register("task.show", handleTaskShow(st))
 	s.Register("task.add", handleTaskAdd(mgr))
 	s.Register("task.update", handleTaskUpdate(mgr))
@@ -420,6 +455,9 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("logsearch.status", handleLogSearchStatus())
 	s.Register("logsearch.install", handleLogSearchInstall())
 	s.Register("logsearch.open", handleLogSearchOpen(mgr))
+
+	s.Register("cmux.direct_send", handleCmuxDirectSend(cmuxClient, mgr))
+	s.Register("focus.enter", handleFocusEnter(mgr, att))
 
 	// Attention pipeline: raise/list/answer/count flags + next-task actions.
 	s.Register("flag.raise", handleFlagRaise(st, att))
@@ -791,6 +829,104 @@ func handleCodeGraphOpen(mgr *project.Manager) ipc.Handler {
 			ConfigPath: cfgPath, Spawned: spawned, Mode: mode,
 		}
 		return resp, nil
+	}
+}
+
+// ---------- cmux.direct_send handler ----------
+
+// handleCmuxDirectSend delivers an arbitrary prompt to a project's
+// bound cmux surface. Same surface-resolution + liveness checks as
+// task.send, minus the task lookup + renderTaskPrompt boilerplate.
+// Used by `chief run refresh` and future automation that needs to
+// nudge Claude with a raw message.
+func handleCmuxDirectSend(cc *cmux.Client, mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.CmuxDirectSendRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.IDOrPath == "" || req.Prompt == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "id_or_path and prompt required"}
+		}
+		ctx := context.Background()
+		p, err := mgr.Store.GetProject(ctx, req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		pf, _ := mgr.ReadYAML(ctx, p.ID)
+		surfaceRef := pf.Cmux.SurfaceID
+		if surfaceRef == "" {
+			return nil, &ipc.RPCError{Code: methods.ErrCodeCmuxUnbound, Message: "no cmux surface bound for this project"}
+		}
+		surfaces, err := cc.ListSurfaces(ctx)
+		if err != nil {
+			return nil, err
+		}
+		alive := false
+		for _, s := range surfaces {
+			if s.Ref == surfaceRef {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			return nil, &ipc.RPCError{Code: methods.ErrCodeCmuxSurfaceGone, Message: "bound cmux surface " + surfaceRef + " no longer exists"}
+		}
+		if err := cc.SendAndRun(ctx, surfaceRef, req.Prompt); err != nil {
+			return nil, err
+		}
+		_ = mgr.Store.InsertEvent(ctx, p.ID, "", "cmux.direct_send", map[string]any{
+			"surface": surfaceRef, "prompt_bytes": len(req.Prompt),
+		})
+		return methods.CmuxDirectSendResponse{SurfaceRef: surfaceRef, Prompt: req.Prompt}, nil
+	}
+}
+
+// ---------- focus.enter handler ----------
+
+// handleFocusEnter snoozes every registered project EXCEPT the target
+// for the specified minutes. Uses the attention manager's per-project
+// snooze cursor — which auto-expires — so no explicit "focus.exit"
+// call is required. Idempotent: calling again with a longer duration
+// extends every non-target snooze; calling with a shorter duration
+// leaves any earlier longer snooze intact (max wins).
+func handleFocusEnter(mgr *project.Manager, att *attention.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.FocusEnterRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.IDOrPath == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "id_or_path required"}
+		}
+		if req.Minutes <= 0 {
+			req.Minutes = 60
+		}
+		ctx := context.Background()
+		target, err := mgr.Store.GetProject(ctx, req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		all, err := mgr.Store.ListProjects(ctx)
+		if err != nil {
+			return nil, err
+		}
+		until := time.Now().Add(time.Duration(req.Minutes) * time.Minute)
+		snoozed := 0
+		for _, p := range all {
+			if p.ID == target.ID {
+				continue
+			}
+			att.Snooze(p.ID, until)
+			snoozed++
+		}
+		_ = mgr.Store.InsertEvent(ctx, target.ID, "", "focus.enter", map[string]any{
+			"minutes": req.Minutes, "snoozed_others": snoozed,
+		})
+		return methods.FocusEnterResponse{
+			FocusedProject: target.Name, Minutes: req.Minutes,
+			SnoozedOthers: snoozed, Until: until,
+		}, nil
 	}
 }
 
@@ -1983,6 +2119,27 @@ func handleDigestFire(d *orchestrator.DigestSweeper) ipc.Handler {
 			return nil, err
 		}
 		return methods.DigestFireResponse{Sent: true}, nil
+	}
+}
+
+// ---------- briefing.preview / briefing.fire (12da) ----------
+
+func handleBriefingPreview(b *orchestrator.MorningBriefer) ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		body, err := b.Compose(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		return methods.BriefingPreviewResponse{Body: body}, nil
+	}
+}
+
+func handleBriefingFire(b *orchestrator.MorningBriefer) ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		if err := b.Fire(context.Background()); err != nil {
+			return nil, err
+		}
+		return methods.BriefingFireResponse{Sent: true}, nil
 	}
 }
 
