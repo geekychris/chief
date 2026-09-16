@@ -587,6 +587,51 @@ func (a *App) OpenCodeGraph(projectID string) (methods.CodeGraphOpenResponse, er
 	return resp, nil
 }
 
+// LogSearchStatus reports install state + prereq availability +
+// whether the .app is currently running.
+func (a *App) LogSearchStatus() (methods.LogSearchStatusResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.LogSearchStatusResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.LogSearchStatusResponse
+	if err := c.Call("logsearch.status", methods.LogSearchStatusRequest{}, &resp); err != nil {
+		return methods.LogSearchStatusResponse{}, err
+	}
+	return resp, nil
+}
+
+// InstallLogSearch clones + builds local_log_search (mvn + jpackage).
+// Long-lived (up to 15min); UI shows the install modal spinner.
+func (a *App) InstallLogSearch() (methods.LogSearchInstallResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.LogSearchInstallResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.LogSearchInstallResponse
+	if err := c.Call("logsearch.install", methods.LogSearchInstallRequest{}, &resp); err != nil {
+		return methods.LogSearchInstallResponse{}, err
+	}
+	return resp, nil
+}
+
+// OpenLogSearch launches (or focuses) Little Log Peep.app. Not
+// project-scoped — log-search maintains its own sources via the app UI.
+func (a *App) OpenLogSearch() (methods.LogSearchOpenResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.LogSearchOpenResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.LogSearchOpenResponse
+	if err := c.Call("logsearch.open", methods.LogSearchOpenRequest{}, &resp); err != nil {
+		return methods.LogSearchOpenResponse{}, err
+	}
+	return resp, nil
+}
+
 // StatsDetailed returns the aggregated analytics payload used by the
 // dashboard modal. days=0 uses the server default (14).
 func (a *App) StatsDetailed(days int) (methods.StatsDetailedResponse, error) {

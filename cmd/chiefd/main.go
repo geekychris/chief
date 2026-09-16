@@ -42,6 +42,7 @@ import (
 	"github.com/geekychris/chief/internal/inbound"
 	"github.com/geekychris/chief/internal/installer"
 	"github.com/geekychris/chief/internal/ipc"
+	"github.com/geekychris/chief/internal/logsearch"
 	"github.com/geekychris/chief/internal/messaging"
 	"github.com/geekychris/chief/internal/methods"
 	"github.com/geekychris/chief/internal/notify"
@@ -416,6 +417,10 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("codegraph.install", handleCodeGraphInstall())
 	s.Register("codegraph.open", handleCodeGraphOpen(mgr))
 
+	s.Register("logsearch.status", handleLogSearchStatus())
+	s.Register("logsearch.install", handleLogSearchInstall())
+	s.Register("logsearch.open", handleLogSearchOpen(mgr))
+
 	// Attention pipeline: raise/list/answer/count flags + next-task actions.
 	s.Register("flag.raise", handleFlagRaise(st, att))
 	s.Register("flag.list", handleFlagList(st))
@@ -786,6 +791,69 @@ func handleCodeGraphOpen(mgr *project.Manager) ipc.Handler {
 			ConfigPath: cfgPath, Spawned: spawned, Mode: mode,
 		}
 		return resp, nil
+	}
+}
+
+// ---------- logsearch handlers ----------
+
+func handleLogSearchStatus() ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		_, javaErr := exec.LookPath("java")
+		_, mvnErr := exec.LookPath("mvn")
+		_, jpErr := exec.LookPath("jpackage")
+		return methods.LogSearchStatusResponse{
+			Installed:   logsearch.IsInstalled(),
+			AppPath:     logsearch.AppBundlePath(),
+			Running:     logsearch.IsRunning(),
+			InstallURL:  logsearch.RepoURL,
+			HasJava:     javaErr == nil,
+			HasMaven:    mvnErr == nil,
+			HasJpackage: jpErr == nil,
+		}, nil
+	}
+}
+
+func handleLogSearchInstall() ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		// Cold-cache install pulls Spring Boot + Lucene + JavaFX +
+		// runs jpackage's runtime bundling — allow 15 minutes.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		r := installer.InstallLogSearch(ctx)
+		return methods.LogSearchInstallResponse{
+			OK: r.OK, AppPath: r.CLIPath,
+			Log: r.Log, Steps: r.Steps, DurationMS: r.DurationMS, Error: r.Error,
+		}, nil
+	}
+}
+
+func handleLogSearchOpen(mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		if !logsearch.IsInstalled() {
+			return nil, &ipc.RPCError{
+				Code:    ipc.ErrCodeInternal,
+				Message: "Little Log Peep.app not installed — run `chief logsearch install` first",
+			}
+		}
+		if logsearch.IsRunning() {
+			// Existing instance — focus rather than duplicate.
+			_ = logsearch.FocusRunning()
+			_ = mgr.Store.InsertEvent(context.Background(), "", "", "logsearch.opened", map[string]any{
+				"spawned": false, "app_path": logsearch.AppBundlePath(),
+			})
+			return methods.LogSearchOpenResponse{
+				AppPath: logsearch.AppBundlePath(), Spawned: false,
+			}, nil
+		}
+		if err := logsearch.Launch(); err != nil {
+			return nil, err
+		}
+		_ = mgr.Store.InsertEvent(context.Background(), "", "", "logsearch.opened", map[string]any{
+			"spawned": true, "app_path": logsearch.AppBundlePath(),
+		})
+		return methods.LogSearchOpenResponse{
+			AppPath: logsearch.AppBundlePath(), Spawned: true,
+		}, nil
 	}
 }
 

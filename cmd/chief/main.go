@@ -46,6 +46,7 @@ func main() {
 		outliersCmd(),
 		lintCmd(),
 		codegraphCmd(),
+		logsearchCmd(),
 		costCmd(),
 		syncCmd(),
 		constitutionCmd(),
@@ -1450,6 +1451,101 @@ func codegraphOpenCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&openBrowser, "browser", true, "open the URL in the default browser after launching")
+	return cmd
+}
+
+// logsearchCmd fronts geekychris/local_log_search: install the
+// self-contained "Little Log Peep.app" (clone + mvn + jpackage) and
+// launch/focus it. Not project-scoped — log-search maintains its own
+// sources via the app UI.
+func logsearchCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "logsearch",
+		Short: "Install + launch geekychris/local_log_search (Little Log Peep).",
+	}
+	cmd.AddCommand(logsearchStatusCmd(), logsearchInstallCmd(), logsearchOpenCmd())
+	return cmd
+}
+
+func logsearchStatusCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Report Little Log Peep install state + prereq availability.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.LogSearchStatusResponse
+			if err := c.Call("logsearch.status", methods.LogSearchStatusRequest{}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			fmt.Printf("local_log_search: installed=%v running=%v\n", resp.Installed, resp.Running)
+			if resp.AppPath != "" {
+				fmt.Printf("  app: %s\n", resp.AppPath)
+			}
+			fmt.Printf("  prereqs: java=%v maven=%v jpackage=%v\n", resp.HasJava, resp.HasMaven, resp.HasJpackage)
+			fmt.Printf("  upstream: %s\n", resp.InstallURL)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON")
+	return cmd
+}
+
+func logsearchInstallCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Clone + build local_log_search (mvn + jpackage, ~3-6min).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.LogSearchInstallResponse
+			if err := c.Call("logsearch.install", methods.LogSearchInstallRequest{}, &resp); err != nil {
+				return err
+			}
+			if !resp.OK {
+				fmt.Fprintln(os.Stderr, resp.Log)
+				return fmt.Errorf("install failed: %s", resp.Error)
+			}
+			fmt.Printf("installed in %.1fs\n", float64(resp.DurationMS)/1000)
+			fmt.Printf("app: %s\n", resp.AppPath)
+			return nil
+		},
+	}
+	return cmd
+}
+
+func logsearchOpenCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "open",
+		Short: "Launch (or focus) Little Log Peep.app.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.LogSearchOpenResponse
+			if err := c.Call("logsearch.open", methods.LogSearchOpenRequest{}, &resp); err != nil {
+				return err
+			}
+			if resp.Spawned {
+				fmt.Printf("launched: %s\n", resp.AppPath)
+			} else {
+				fmt.Printf("focused existing: %s\n", resp.AppPath)
+			}
+			return nil
+		},
+	}
 	return cmd
 }
 

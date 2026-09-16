@@ -447,6 +447,38 @@ type CodeGraphOpenResponse struct {
 	Mode string `json:"mode"`
 }
 
+// ---------- logsearch.status / install / open ----------
+
+type LogSearchStatusRequest struct{}
+type LogSearchStatusResponse struct {
+	Installed  bool   `json:"installed"`
+	AppPath    string `json:"app_path,omitempty"`
+	Running    bool   `json:"running"`
+	InstallURL string `json:"install_url"`
+	HasJava    bool   `json:"has_java"`
+	HasMaven   bool   `json:"has_maven"`
+	HasJpackage bool  `json:"has_jpackage"`
+}
+
+type LogSearchInstallRequest struct{}
+type LogSearchInstallResponse struct {
+	OK         bool     `json:"ok"`
+	AppPath    string   `json:"app_path,omitempty"`
+	Log        string   `json:"log"`
+	Steps      []string `json:"steps"`
+	DurationMS int64    `json:"duration_ms"`
+	Error      string   `json:"error,omitempty"`
+}
+
+// LogSearchOpenRequest launches (or focuses) Little Log Peep.
+// Log search is a singleton — users register sources once via the
+// app's own UI — so no project scoping is applied.
+type LogSearchOpenRequest struct{}
+type LogSearchOpenResponse struct {
+	AppPath string `json:"app_path"`
+	Spawned bool   `json:"spawned"` // true = fresh launch; false = existing instance focused
+}
+
 // ---------- analyzer.install ----------
 
 // AnalyzerInstallRequest kicks off the analyzer install (clone + go build).

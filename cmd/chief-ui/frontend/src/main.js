@@ -14,6 +14,7 @@ import {
   ApproveNextTask, SkipNextTask, SnoozeNextTask,
   NextUp, StatsDetailed,
   CodeGraphStatus, InstallCodeGraph, OpenCodeGraph,
+  LogSearchStatus, InstallLogSearch, OpenLogSearch,
 } from '../wailsjs/go/main/App';
 
 // -------- state --------
@@ -98,6 +99,8 @@ const els = {
   // Code-graph block
   btnOpenCodeGraph: $('btn-open-codegraph'),
   pmCodeGraphHint: $('pm-codegraph-hint'),
+  btnOpenLogSearch: $('btn-open-logsearch'),
+  pmLogSearchHint: $('pm-logsearch-hint'),
   // Modal: install progress
   modalInstall: $('modal-install'),
   installStatus: $('install-status'),
@@ -163,6 +166,7 @@ els.btnOpenSessionsDir.addEventListener('click', () => {
 });
 els.btnOpenHistory.addEventListener('click', openHistoryForCurrentProject);
 els.btnOpenCodeGraph.addEventListener('click', openCodeGraphForCurrentProject);
+els.btnOpenLogSearch.addEventListener('click', openLogSearch);
 els.btnInstallStart.addEventListener('click', runAnalyzerInstall);
 els.btnInstallClose.addEventListener('click', () => els.modalInstall.classList.add('hidden'));
 els.btnInbox.addEventListener('click', openInbox);
@@ -828,6 +832,44 @@ async function openCodeGraphForCurrentProject() {
       showToast('Open failed: ' + msg, true);
     }
     console.error('code graph open failed', e);
+  }
+}
+
+// Log search is a singleton — no project scoping. First click launches
+// or focuses the .app; if it's not installed the user gets a hint with
+// the exact install command (mvn + jpackage takes 3-6min so we don't
+// block the UI on that).
+async function openLogSearch() {
+  els.pmLogSearchHint.classList.remove('hidden');
+  els.pmLogSearchHint.textContent = 'Checking Little Log Peep…';
+  try {
+    const status = await LogSearchStatus();
+    if (!status.installed) {
+      const missing = [];
+      if (!status.has_java) missing.push('java');
+      if (!status.has_maven) missing.push('mvn');
+      if (!status.has_jpackage) missing.push('jpackage');
+      const missingHint = missing.length
+        ? ` (missing prereqs: ${missing.join(', ')} — install a JDK 21+ + Maven first)`
+        : '';
+      els.pmLogSearchHint.innerHTML =
+        `Little Log Peep isn't installed yet. In a terminal run: ` +
+        `<code>chief logsearch install</code> (clones + mvn + jpackage, ~3-6min)` +
+        missingHint + `. Then re-click.`;
+      showToast('Little Log Peep not installed — run `chief logsearch install`', true);
+      return;
+    }
+    const open = await OpenLogSearch();
+    els.pmLogSearchHint.textContent =
+      open.spawned
+        ? `Launched ${open.app_path}`
+        : `Focused existing instance (${open.app_path})`;
+    showToast(open.spawned ? 'launched Little Log Peep' : 'focused Little Log Peep');
+  } catch (e) {
+    const msg = String(e && e.message || e);
+    els.pmLogSearchHint.textContent = 'Open failed: ' + msg;
+    showToast('Open failed: ' + msg, true);
+    console.error('log search open failed', e);
   }
 }
 

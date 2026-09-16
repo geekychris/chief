@@ -1,5 +1,6 @@
 # Completed
 
+- [x] {id:614b} add local log search [category:Backlog] (done 2026-09-16 16:22:27)
 - [x] {id:40fd} what other features? [category:Backlog] (done 2026-09-16 06:30:46)
 - [x] {id:53b0} add project does not do anything [category:Backlog] (done 2026-09-16 06:30:46)
 - [x] {id:00a7} auto create constitution [category:Backlog] (done 2026-09-16 06:30:46)

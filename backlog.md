@@ -1,6 +1,4 @@
 ## Backlog
-- [ ] {id:614b} add local log search
-  Like you did with codegraph search and zhistory add support to run local log search.  This is a java app that needs also the same treatment like code graph search etc where the UI is part of the app (like wails in go apps)….use whatever you learnt from code graph search.  This is the project…it needs an easy way to build and install and access from chief https://github.com/geekychris/local_log_search
 
 ## One-shots (proposed via 40fd)
 - [ ] {id:850d} `chief run ensure-clean` — walk every registered project, report uncommitted changes / unpushed commits / stale branches; optional --autocommit "chief autocommit" + push. One command that answers "what's not yet on the remote across everything I own?".
