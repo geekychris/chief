@@ -228,6 +228,7 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("task.add", handleTaskAdd(mgr))
 	s.Register("task.update", handleTaskUpdate(mgr))
 	s.Register("task.reorder", handleTaskReorder(mgr))
+	s.Register("task.delete", handleTaskDelete(mgr))
 
 	// cmux integration (Feature B — send task to a running Claude pane).
 	// The cmux socket enforces access control; chiefd (not spawned inside
@@ -246,6 +247,7 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("cmux.candidates", handleCmuxCandidates(cmuxClient, mgr))
 	s.Register("cmux.bind", handleCmuxBind(mgr))
 	s.Register("task.send", handleTaskSend(cmuxClient, mgr, st))
+	s.Register("task.send_batch", handleTaskSendBatch(cmuxClient, mgr, st))
 	s.Register("project.sessions", handleProjectSessions(mgr))
 	s.Register("analyzer.install", handleAnalyzerInstall())
 
@@ -566,13 +568,123 @@ func handleTaskSend(cc *cmux.Client, mgr *project.Manager, st *store.Store) ipc.
 		}
 
 		prompt := renderTaskPrompt(t, req.ExtraInstruction)
-		if err := cc.Send(ctx, surfaceRef, prompt); err != nil {
+		if err := cc.SendAndRun(ctx, surfaceRef, prompt); err != nil {
 			return nil, err
 		}
 		_ = st.InsertEvent(ctx, t.ProjectID, "", "task.sent",
 			map[string]any{"task_id": t.ID, "surface": surfaceRef})
 		return methods.TaskSendResponse{SurfaceRef: surfaceRef, Prompt: prompt}, nil
 	}
+}
+
+// handleTaskSendBatch composes a single prompt from N tasks and delivers
+// it to the surface bound to their (single) project. Requires all task_ids
+// to be in the same project — cmux surfaces are per-project.
+func handleTaskSendBatch(cc *cmux.Client, mgr *project.Manager, st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.TaskSendBatchRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if len(req.TaskIDs) == 0 {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "task_ids required"}
+		}
+		ctx := context.Background()
+
+		// Load tasks + validate same-project.
+		tasks := make([]store.Task, 0, len(req.TaskIDs))
+		var projectID string
+		for _, id := range req.TaskIDs {
+			t, err := st.GetTask(ctx, id)
+			if err != nil {
+				return nil, fmt.Errorf("task %s: %w", id, err)
+			}
+			if projectID == "" {
+				projectID = t.ProjectID
+			} else if t.ProjectID != projectID {
+				return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "task.send_batch: all task_ids must belong to the same project (cmux surfaces are per-project)"}
+			}
+			tasks = append(tasks, t)
+		}
+
+		// Resolve target surface: explicit override first, then persisted binding.
+		surfaceRef := req.SurfaceOverride
+		if surfaceRef == "" {
+			pf, _ := mgr.ReadYAML(ctx, projectID)
+			surfaceRef = pf.Cmux.SurfaceID
+		}
+		if surfaceRef == "" {
+			return nil, &ipc.RPCError{Code: methods.ErrCodeCmuxUnbound, Message: "no cmux surface bound for this project; call cmux.candidates + cmux.bind first"}
+		}
+
+		// Verify the surface is alive.
+		surfaces, err := cc.ListSurfaces(ctx)
+		if err != nil {
+			return nil, err
+		}
+		found := false
+		for _, s := range surfaces {
+			if s.Ref == surfaceRef {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, &ipc.RPCError{Code: methods.ErrCodeCmuxSurfaceGone, Message: "bound cmux surface " + surfaceRef + " no longer exists; rebind"}
+		}
+
+		// Persist override if provided.
+		if req.SurfaceOverride != "" {
+			_, _ = mgr.WriteYAML(ctx, projectID, func(pf *project.ProjectFile) {
+				pf.Cmux.SurfaceID = req.SurfaceOverride
+			})
+		}
+
+		prompt := renderBatchPrompt(tasks, req.ExtraInstruction)
+		if err := cc.SendAndRun(ctx, surfaceRef, prompt); err != nil {
+			return nil, err
+		}
+		for _, t := range tasks {
+			_ = st.InsertEvent(ctx, t.ProjectID, "", "task.sent",
+				map[string]any{"task_id": t.ID, "surface": surfaceRef, "batch": true, "batch_size": len(tasks)})
+		}
+		return methods.TaskSendBatchResponse{
+			SurfaceRef: surfaceRef, Prompt: prompt,
+			Count: len(tasks), TaskIDs: req.TaskIDs,
+		}, nil
+	}
+}
+
+// renderBatchPrompt composes a "please do these N tasks in order" prompt.
+// Format is chosen so Claude sees the list as a single user turn and works
+// through them serially, marking each done before moving on.
+func renderBatchPrompt(tasks []store.Task, extra string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[chief batch — %d tasks from the backlog]\n\n", len(tasks))
+	fmt.Fprintln(&b, "Please work through the following tasks in order. As you finish each one, mark it complete in backlog.md by changing `- [ ]` to `- [x]` on the line beginning with `{id:XXXX}`, then move on to the next.")
+	fmt.Fprintln(&b)
+	for i, t := range tasks {
+		fmt.Fprintf(&b, "─── %d/%d ─── [id:%s] %s\n", i+1, len(tasks), t.ID, t.Title)
+		if t.Category != "" {
+			fmt.Fprintf(&b, "Category: %s\n", t.Category)
+		}
+		if t.Priority != 0 {
+			fmt.Fprintf(&b, "Priority: %d\n", t.Priority)
+		}
+		if len(t.RequiredResources) > 0 {
+			fmt.Fprintf(&b, "Resources: %s\n", strings.Join(t.RequiredResources, ", "))
+		}
+		if t.Body != "" {
+			fmt.Fprintln(&b)
+			fmt.Fprintln(&b, t.Body)
+		}
+		fmt.Fprintln(&b)
+	}
+	if extra != "" {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, extra)
+	}
+	return b.String()
 }
 
 // renderTaskPrompt turns a Task into the user prompt that gets typed into
@@ -686,6 +798,22 @@ func handleTaskReorder(mgr *project.Manager) ipc.Handler {
 		}
 		applied := before.SourceLine != after.SourceLine
 		return methods.TaskReorderResponse{Task: after, Applied: applied}, nil
+	}
+}
+
+func handleTaskDelete(mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.TaskDeleteRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.TaskID == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "task_id required"}
+		}
+		if err := mgr.DeleteTask(context.Background(), req.TaskID); err != nil {
+			return nil, err
+		}
+		return methods.TaskDeleteResponse{Deleted: true}, nil
 	}
 }
 

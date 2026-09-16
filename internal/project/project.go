@@ -319,6 +319,43 @@ func (m *Manager) UpdateTask(ctx context.Context, taskID string, opts UpdateTask
 	return m.Store.GetTask(ctx, taskID)
 }
 
+// DeleteTask removes a task from backlog.md (checkbox line + body). The
+// subsequent Rescan drops the row from the DB. Only supports backlog.md
+// items — completedlog.md entries stay as historical record and should be
+// edited manually if the user really wants to expunge them.
+func (m *Manager) DeleteTask(ctx context.Context, taskID string) error {
+	t, err := m.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if t.SourceFile != "backlog.md" {
+		return fmt.Errorf("task %s lives in %s; only backlog.md items can be deleted", taskID, t.SourceFile)
+	}
+	proj, err := m.Store.GetProject(ctx, t.ProjectID)
+	if err != nil {
+		return err
+	}
+	backlogPath := filepath.Join(proj.Path, "backlog.md")
+	content, err := os.ReadFile(backlogPath)
+	if err != nil {
+		return err
+	}
+	tasks := backlog.ParseFile(string(content))
+	newContent := backlog.RemoveTasksByIDs(string(content), tasks, map[string]bool{taskID: true})
+	if string(newContent) == string(content) {
+		return nil // no-op (nothing matched)
+	}
+	if err := m.writeSuppressed(backlogPath, []byte(newContent)); err != nil {
+		return err
+	}
+	if _, err := m.Rescan(ctx, proj.ID); err != nil {
+		return err
+	}
+	_ = m.Store.InsertEvent(ctx, proj.ID, "", "task.deleted",
+		map[string]any{"id": taskID, "title": t.Title})
+	return nil
+}
+
 // MoveTask swaps the given task's block with its adjacent same-section
 // sibling. Direction is "up" or "down". Silent no-op when the task is at
 // the edge of its section (blocked by an H1/H2/H3 header).

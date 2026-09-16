@@ -142,6 +142,34 @@ type TaskReorderResponse struct {
 	Applied bool       `json:"applied"` // false = no-op (task already at edge of its section)
 }
 
+// ---------- task.delete ----------
+
+type TaskDeleteRequest struct {
+	TaskID string `json:"task_id"`
+}
+
+type TaskDeleteResponse struct {
+	Deleted bool `json:"deleted"`
+}
+
+// ---------- task.send_batch ----------
+
+// TaskSendBatchRequest bundles N tasks into a single "please do these in order"
+// prompt and injects it into the cmux surface bound to the (single) project
+// all the tasks belong to.  Returns an error if the tasks span projects.
+type TaskSendBatchRequest struct {
+	TaskIDs         []string `json:"task_ids"`
+	SurfaceOverride string   `json:"surface_override,omitempty"`
+	ExtraInstruction string  `json:"extra_instruction,omitempty"`
+}
+
+type TaskSendBatchResponse struct {
+	SurfaceRef string   `json:"surface_ref"`
+	Prompt     string   `json:"prompt"`
+	Count      int      `json:"count"`
+	TaskIDs    []string `json:"task_ids"`
+}
+
 // ---------- historyviewer.status / install / open ----------
 
 type HistoryViewerStatusRequest struct{}

@@ -197,6 +197,66 @@ func (a *App) ReorderTask(taskID, direction string) (methods.TaskReorderResponse
 	return resp, nil
 }
 
+// DeleteTask removes the task from its project's backlog.md (which cascades
+// into the store via Rescan).  Only backlog.md items are deletable —
+// completed items in completedlog.md stay as history.
+func (a *App) DeleteTask(taskID string) error {
+	c, err := a.dial()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	var resp methods.TaskDeleteResponse
+	return c.Call("task.delete", methods.TaskDeleteRequest{TaskID: taskID}, &resp)
+}
+
+// SendTasksBatch composes a combined "please work on these N tasks" prompt
+// and injects it into the project's bound cmux surface.  Requires all
+// task_ids to belong to the same project.  Mirrors SendTask's return shape
+// (including the app-level graceful handling of unbound / gone surfaces).
+type SendTasksBatchResult struct {
+	OK           bool                            `json:"ok"`
+	Count        int                             `json:"count,omitempty"`
+	SurfaceRef   string                          `json:"surface_ref,omitempty"`
+	Prompt       string                          `json:"prompt,omitempty"`
+	NeedsBinding bool                            `json:"needs_binding,omitempty"`
+	SurfaceGone  bool                            `json:"surface_gone,omitempty"`
+	Candidates   *methods.CmuxCandidatesResponse `json:"candidates,omitempty"`
+	Error        string                          `json:"error,omitempty"`
+}
+
+func (a *App) SendTasksBatch(taskIDs []string, surfaceOverride string) (SendTasksBatchResult, error) {
+	c, err := a.dial()
+	if err != nil {
+		return SendTasksBatchResult{}, err
+	}
+	defer c.Close()
+	var resp methods.TaskSendBatchResponse
+	req := methods.TaskSendBatchRequest{TaskIDs: taskIDs, SurfaceOverride: surfaceOverride}
+	if err := c.Call("task.send_batch", req, &resp); err != nil {
+		if rpc, ok := err.(*ipc.RPCError); ok {
+			if rpc.Code == methods.ErrCodeCmuxUnbound || rpc.Code == methods.ErrCodeCmuxSurfaceGone {
+				// Look up the first task's project id to fetch candidates.
+				if pid, cerr := a.projectIDForTask(taskIDs[0]); cerr == nil {
+					if cands, cerr2 := a.CmuxCandidates(pid); cerr2 == nil {
+						return SendTasksBatchResult{
+							OK: false,
+							NeedsBinding: rpc.Code == methods.ErrCodeCmuxUnbound,
+							SurfaceGone:  rpc.Code == methods.ErrCodeCmuxSurfaceGone,
+							Candidates:   &cands,
+							Error:        rpc.Message,
+						}, nil
+					}
+				}
+			}
+		}
+		return SendTasksBatchResult{OK: false, Error: err.Error()}, nil
+	}
+	return SendTasksBatchResult{
+		OK: true, Count: resp.Count, SurfaceRef: resp.SurfaceRef, Prompt: resp.Prompt,
+	}, nil
+}
+
 // CmuxCandidates returns candidate cmux surfaces for a project (cwd matches
 // filtered to Claude sessions) plus the full surface list for a manual override.
 func (a *App) CmuxCandidates(projectID string) (methods.CmuxCandidatesResponse, error) {

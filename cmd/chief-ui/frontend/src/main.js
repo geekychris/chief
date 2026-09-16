@@ -4,8 +4,8 @@ import './app.css';
 import {
   Ping, ListProjects, ListBacklog, GetTask,
   AddProject, RescanProject, ReadProjectFile,
-  AddTask, UpdateTask, ReorderTask,
-  CmuxCandidates, CmuxBind, SendTask,
+  AddTask, UpdateTask, ReorderTask, DeleteTask,
+  CmuxCandidates, CmuxBind, SendTask, SendTasksBatch,
   GetProjectSessions, RevealInFinder, OpenPath, OpenURL,
   OpenClaudeTrace, OpenClaudeTraceForProject,
   InstallAnalyzer,
@@ -20,6 +20,7 @@ const state = {
   statusFilter: '',      // '' = all — completed rows inline styled distinctly
   tasks: [],             // BacklogRow[]
   selectedTaskId: '',
+  batchSelection: new Set(), // task ids the user has checkboxed for batch-send
 };
 
 // -------- DOM refs --------
@@ -47,6 +48,9 @@ const els = {
   detailClose: $('detail-close'),
   btnSendCmux: $('btn-send-cmux'),
   btnEditTask: $('btn-edit-task'),
+  btnDeleteTask: $('btn-delete-task'),
+  btnSendSelected: $('btn-send-selected'),
+  selectAll: $('select-all'),
   // Modal: add-task
   modalAdd: $('modal-add'),
   addTitle: $('add-title'),
@@ -108,6 +112,9 @@ els.detailClose.addEventListener('click', () => {
 });
 els.btnSendCmux.addEventListener('click', () => sendCurrentTaskToCmux());
 els.btnEditTask.addEventListener('click', openEditTaskModal);
+els.btnDeleteTask.addEventListener('click', deleteCurrentTask);
+els.btnSendSelected.addEventListener('click', sendBatchToCmux);
+els.selectAll.addEventListener('change', (e) => toggleSelectAll(e.target.checked));
 els.btnAddSave.addEventListener('click', submitAddTask);
 els.btnAddCancel.addEventListener('click', () => els.modalAdd.classList.add('hidden'));
 els.btnEditSave.addEventListener('click', submitEditTask);
@@ -556,7 +563,8 @@ function renderSidebar() {
 
 function renderBacklog() {
   if (!state.tasks || state.tasks.length === 0) {
-    els.backlogBody.innerHTML = `<tr><td colspan="7" class="empty">no tasks match</td></tr>`;
+    els.backlogBody.innerHTML = `<tr><td colspan="8" class="empty">no tasks match</td></tr>`;
+    updateBatchToolbar();
     return;
   }
   // Reorder controls only make sense within a single project and only for
@@ -568,10 +576,10 @@ function renderBacklog() {
     const sel = t.id === state.selectedTaskId ? ' selected' : '';
     const titleTruncated = t.title.length > 80 ? t.title.slice(0, 77) + '…' : t.title;
     const showReorder = projectView && t.status !== 'done' && t.source_file === 'backlog.md';
+    const canBatch = t.status !== 'done' && t.source_file === 'backlog.md';
+    const checked = state.batchSelection.has(t.id) ? 'checked' : '';
     let reorderHTML = '';
     if (showReorder) {
-      // Disable buttons at obvious edges (first / last row of the section).
-      // Server also enforces (returns applied=false); this is UX polish.
       const prev = state.tasks[i - 1];
       const next = state.tasks[i + 1];
       const canUp   = !!prev && prev.status === t.status && (prev.category || '') === (t.category || '') && prev.source_file === 'backlog.md';
@@ -583,6 +591,7 @@ function renderBacklog() {
     }
     return `
       <tr class="${sel}" data-id="${escapeHtml(t.id)}">
+        <td class="col-select">${canBatch ? `<input type="checkbox" class="row-check" data-id="${escapeHtml(t.id)}" ${checked}/>` : ''}</td>
         <td class="col-status st-${t.status}">${glyph}</td>
         <td class="col-id">${escapeHtml(t.id)}</td>
         <td class="col-prio">${t.priority || 0}</td>
@@ -593,11 +602,12 @@ function renderBacklog() {
       </tr>
     `;
   }).join('');
-  // Row click → detail. Ignore clicks that originated on the reorder buttons
-  // (they have their own handlers below).
   els.backlogBody.querySelectorAll('tr').forEach(tr => {
     tr.addEventListener('click', (ev) => {
+      // Ignore clicks on the batch checkbox or the reorder buttons — they
+      // shouldn't open the detail drawer.
       if (ev.target.closest('.col-reorder')) return;
+      if (ev.target.closest('.col-select')) return;
       showTaskDetail(tr.dataset.id);
     });
   });
@@ -607,6 +617,126 @@ function renderBacklog() {
   els.backlogBody.querySelectorAll('button.btn-down').forEach(b => {
     b.addEventListener('click', (ev) => { ev.stopPropagation(); reorderTask(b.dataset.id, 'down'); });
   });
+  els.backlogBody.querySelectorAll('input.row-check').forEach(cb => {
+    cb.addEventListener('change', (ev) => {
+      ev.stopPropagation();
+      if (cb.checked) state.batchSelection.add(cb.dataset.id);
+      else state.batchSelection.delete(cb.dataset.id);
+      updateBatchToolbar();
+    });
+  });
+  updateBatchToolbar();
+}
+
+// updateBatchToolbar shows/hides "Send N to cmux" based on selection. The
+// batch endpoint requires all tasks to be in one project, so batch is only
+// meaningful in a per-project view. The button is hidden otherwise.
+function updateBatchToolbar() {
+  const count = state.batchSelection.size;
+  const projectView = !!state.selectedProject;
+  if (count > 0 && projectView) {
+    els.btnSendSelected.classList.remove('hidden');
+    els.btnSendSelected.textContent = `Send ${count} to cmux`;
+  } else {
+    els.btnSendSelected.classList.add('hidden');
+  }
+  // Update select-all checkbox tri-state.
+  const checkable = state.tasks.filter(t => t.status !== 'done' && t.source_file === 'backlog.md');
+  const selectedInView = checkable.filter(t => state.batchSelection.has(t.id));
+  els.selectAll.indeterminate = selectedInView.length > 0 && selectedInView.length < checkable.length;
+  els.selectAll.checked = checkable.length > 0 && selectedInView.length === checkable.length;
+}
+
+function toggleSelectAll(check) {
+  const checkable = state.tasks.filter(t => t.status !== 'done' && t.source_file === 'backlog.md');
+  checkable.forEach(t => {
+    if (check) state.batchSelection.add(t.id);
+    else state.batchSelection.delete(t.id);
+  });
+  renderBacklog();
+}
+
+async function sendBatchToCmux() {
+  if (state.batchSelection.size === 0) return;
+  const ids = Array.from(state.batchSelection);
+  try {
+    const res = await SendTasksBatch(ids, '');
+    if (res.ok) {
+      const orig = els.btnSendSelected.textContent;
+      els.btnSendSelected.textContent = `Sent ${res.count} → ${res.surface_ref}`;
+      setTimeout(() => { els.btnSendSelected.textContent = orig; }, 2500);
+      state.batchSelection.clear();
+      await refreshAll();
+      return;
+    }
+    if (res.needs_binding || res.surface_gone) {
+      // Reuse the same picker as single-send. When user picks a surface,
+      // fire batch again with the override.
+      openCmuxPickerForBatch(res.candidates, ids);
+      return;
+    }
+    alert('Batch send failed: ' + (res.error || 'unknown'));
+  } catch (e) {
+    alert('Batch send failed: ' + (e.message || e));
+  }
+}
+
+function openCmuxPickerForBatch(cands, taskIds) {
+  if (!cands) return;
+  const matches = cands.cwd_matches || [];
+  const all = cands.all_surfaces || [];
+  const current = cands.current_surface || '';
+  els.cmuxMatchesBlock.style.display = matches.length ? '' : 'none';
+  els.cmuxMatches.innerHTML = matches.length
+    ? matches.map(s => renderSurfaceRow(s, current)).join('')
+    : '';
+  els.cmuxAll.innerHTML = all.length
+    ? all.map(s => renderSurfaceRow(s, current)).join('')
+    : '<li class="empty-hint">no cmux surfaces (is cmux running?)</li>';
+  const handler = async (li) => {
+    const ref = li.dataset.ref;
+    els.modalCmux.classList.add('hidden');
+    try {
+      const res = await SendTasksBatch(taskIds, ref);
+      if (res.ok) {
+        state.batchSelection.clear();
+        await refreshAll();
+      } else {
+        alert('Batch send failed: ' + (res.error || 'unknown'));
+      }
+    } catch (e) {
+      alert('Batch send failed: ' + (e.message || e));
+    }
+  };
+  els.cmuxMatches.querySelectorAll('li').forEach(li => {
+    if (li.classList.contains('empty-hint')) return;
+    li.addEventListener('click', () => handler(li));
+  });
+  els.cmuxAll.querySelectorAll('li').forEach(li => {
+    if (li.classList.contains('empty-hint')) return;
+    li.addEventListener('click', () => handler(li));
+  });
+  els.modalCmux.classList.remove('hidden');
+}
+
+async function deleteCurrentTask() {
+  if (!state.selectedTaskId) return;
+  const t = state.tasks.find(x => x.id === state.selectedTaskId);
+  if (!t) return;
+  if (t.source_file !== 'backlog.md') {
+    alert('Only backlog.md items are deletable in-app. Completed items live in completedlog.md as history.');
+    return;
+  }
+  if (!confirm(`Delete task ${t.id}?\n\n${t.title}\n\nThis removes the line from backlog.md.`)) return;
+  try {
+    await DeleteTask(t.id);
+    state.selectedTaskId = '';
+    state.batchSelection.delete(t.id);
+    els.detail.classList.add('hidden');
+    await refreshAll();
+  } catch (e) {
+    alert('Delete failed: ' + (e.message || e));
+  }
 }
 
 async function reorderTask(taskId, direction) {

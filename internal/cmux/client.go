@@ -135,17 +135,49 @@ func (c *Client) CandidatesForPath(ctx context.Context, path string, claudeOnly 
 
 // Send injects raw text into the given surface. cmux interprets `\n` (and
 // `\r`) as Enter, so callers should include a trailing "\n" if they want the
-// input submitted.
+// input submitted. Prefer SendAndRun when you want a guaranteed submit.
 func (c *Client) Send(ctx context.Context, surfaceRef, text string) error {
 	if surfaceRef == "" {
 		return errors.New("Send: surfaceRef required")
 	}
-	// The cmux CLI already interprets the literal backslash-n sequence, so
-	// pass through unchanged.
 	if _, err := c.run(ctx, "send", "--surface", surfaceRef, "--", text); err != nil {
 		return err
 	}
 	return nil
+}
+
+// SendKey sends a single named key event (see `cmux send-key --help` for the
+// key vocabulary — "enter", "esc", "tab", "ctrl+c", etc.).
+func (c *Client) SendKey(ctx context.Context, surfaceRef, key string) error {
+	if surfaceRef == "" {
+		return errors.New("SendKey: surfaceRef required")
+	}
+	if key == "" {
+		return errors.New("SendKey: key required")
+	}
+	if _, err := c.run(ctx, "send-key", "--surface", surfaceRef, "--", key); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SendAndRun types text into the surface and then explicitly submits it with
+// an Enter key event. Use for prompts that must be executed (not just queued
+// as a draft the user hits Enter on later). Trims trailing newlines from
+// text so we don't double-submit — Enter is fired exactly once, at the end.
+func (c *Client) SendAndRun(ctx context.Context, surfaceRef, text string) error {
+	// Drop trailing newline(s) so the explicit send-key enter is the sole
+	// submit signal. Preserves internal newlines in the body.
+	trimmed := text
+	for len(trimmed) > 0 && (trimmed[len(trimmed)-1] == '\n' || trimmed[len(trimmed)-1] == '\r') {
+		trimmed = trimmed[:len(trimmed)-1]
+	}
+	if trimmed != "" {
+		if err := c.Send(ctx, surfaceRef, trimmed); err != nil {
+			return err
+		}
+	}
+	return c.SendKey(ctx, surfaceRef, "enter")
 }
 
 // run executes cmux with args, returning stdout. Errors include stderr for
