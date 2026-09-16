@@ -53,13 +53,27 @@ func InstallCodeGraphSearch(ctx context.Context) InstallResult {
 		bin, hint string
 	}{
 		{"git", "install via `brew install git`"},
-		{"java", "install via `brew install openjdk@21` (needs Java 21+ with preview)"},
+		{"java", "install via `brew install openjdk@21` (needs Java 21+)"},
 		{"mvn", "install via `brew install maven`"},
 		{"npm", "install via `brew install node`"},
 	} {
 		if _, err := exec.LookPath(req.bin); err != nil {
 			return finish(fmt.Errorf("%s not on PATH — %s", req.bin, req.hint))
 		}
+	}
+	// tree-sitter is a soft prereq: without it, code_graph_search's
+	// Go/Rust/TS/C/C++ parsers fall back to a regex-based extractor
+	// that misses ~half the graph (no interface method specs, no
+	// USES_TYPE edges, no structural IMPLEMENTS satisfaction). Warn
+	// but don't block — installing tree-sitter is a follow-up user
+	// task that requires grammar clones too.
+	if _, err := exec.LookPath("tree-sitter"); err != nil {
+		log("⚠ tree-sitter not on PATH — Go/Rust/TS/C/C++ parsing will use the")
+		log("  regex fallback (much shallower). To enable full parsing:")
+		log("    brew install tree-sitter-cli")
+		log("    git clone https://github.com/tree-sitter/tree-sitter-go   ~/.tree-sitter/grammars/tree-sitter-go")
+		log("    git clone https://github.com/tree-sitter/tree-sitter-rust ~/.tree-sitter/grammars/tree-sitter-rust")
+		log("    tree-sitter init-config   # add ~/.tree-sitter/grammars to parser-directories")
 	}
 
 	cacheDir, err := CacheDir()
