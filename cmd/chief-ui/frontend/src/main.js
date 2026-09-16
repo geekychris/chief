@@ -15,6 +15,7 @@ import {
   NextUp, StatsDetailed,
   CodeGraphStatus, InstallCodeGraph, OpenCodeGraph,
   LogSearchStatus, InstallLogSearch, OpenLogSearch,
+  Goto, BookmarkList, BookmarkSet,
 } from '../wailsjs/go/main/App';
 
 // -------- state --------
@@ -185,6 +186,25 @@ document.addEventListener('keydown', (e) => {
     state.selectedTaskId = '';
     els.detail.classList.add('hidden');
     renderBacklog();
+  }
+  // Bookmark hotkeys (8e23): ⌘1..⌘9 jumps to the pinned project. Only
+  // fires with Cmd (not shift/alt/etc.) so number-input in text fields
+  // isn't hijacked.
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey &&
+      e.key >= '1' && e.key <= '9') {
+    // Don't hijack cmd+digit inside inputs / textareas.
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    const slot = parseInt(e.key, 10);
+    Goto(slot).then((r) => {
+      if (r && r.project_id) {
+        selectProject(r.project_id);
+        showToast(`⌘${slot} → ${r.project_name}`);
+      }
+    }).catch((err) => {
+      showToast(`⌘${slot}: ${String(err.message || err)}`, true);
+    });
   }
 });
 

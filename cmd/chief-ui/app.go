@@ -587,6 +587,50 @@ func (a *App) OpenCodeGraph(projectID string) (methods.CodeGraphOpenResponse, er
 	return resp, nil
 }
 
+// Goto resolves a bookmark slot to a project and returns its id + name.
+// The frontend then calls selectProject(id) so ⌘1..⌘9 in Chief.app jumps
+// straight to a pinned project.
+func (a *App) Goto(slot int) (methods.BookmarkGotoResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.BookmarkGotoResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.BookmarkGotoResponse
+	if err := c.Call("bookmark.goto", methods.BookmarkGotoRequest{Slot: slot}, &resp); err != nil {
+		return methods.BookmarkGotoResponse{}, err
+	}
+	return resp, nil
+}
+
+// BookmarkList returns all 9 slots + resolved projects for the UI.
+func (a *App) BookmarkList() (methods.BookmarkListResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.BookmarkListResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.BookmarkListResponse
+	if err := c.Call("bookmark.list", methods.BookmarkListRequest{}, &resp); err != nil {
+		return methods.BookmarkListResponse{}, err
+	}
+	return resp, nil
+}
+
+// BookmarkSet pins a project ref to a slot.
+func (a *App) BookmarkSet(slot int, ref string) (methods.BookmarkSetResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.BookmarkSetResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.BookmarkSetResponse
+	if err := c.Call("bookmark.set", methods.BookmarkSetRequest{Slot: slot, Ref: ref}, &resp); err != nil {
+		return methods.BookmarkSetResponse{}, err
+	}
+	return resp, nil
+}
+
 // LogSearchStatus reports install state + prereq availability +
 // whether the .app is currently running.
 func (a *App) LogSearchStatus() (methods.LogSearchStatusResponse, error) {

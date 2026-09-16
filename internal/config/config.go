@@ -31,6 +31,9 @@ type Config struct {
 	// (ntfy, Pushover, Telegram, Slack, local-log); routing decides
 	// which fire for which urgency.
 	Messaging MessagingConfig `yaml:"messaging,omitempty"`
+	// Bookmarks (8e23) maps 1..9 → project ref for `chief goto` and
+	// Chief.app's ⌘1..⌘9 hotkeys.
+	Bookmarks BookmarksConfig `yaml:"bookmarks,omitempty"`
 }
 
 // MessagingConfig is the plugin + routing configuration for outbound
@@ -74,6 +77,14 @@ type EstimatorConfig struct {
 	Enabled    bool   `yaml:"enabled,omitempty"`
 	ClaudeBin  string `yaml:"claude_bin,omitempty"`
 	TimeoutSec int    `yaml:"timeout_sec,omitempty"`
+}
+
+// BookmarksConfig (8e23) maps slot numbers 1..9 to project references
+// (name, id, or path — resolved server-side via store.GetProject). Used
+// by `chief goto <N>` and Chief.app's ⌘1..⌘9 hotkeys. Empty slot = no
+// bookmark.
+type BookmarksConfig struct {
+	Slots map[int]string `yaml:"slots,omitempty"`
 }
 
 // BriefingConfig configures the morning briefing (12da). Disabled by

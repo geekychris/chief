@@ -326,6 +326,17 @@ func run() error {
 		timeTracker.Run(ctx)
 	}()
 
+	// Kill-idle-Claude sweeper (1b72): every 10min, close (or prompt to
+	// close) Claude surfaces whose title hasn't changed in >AfterHours.
+	killIdle := &orchestrator.KillIdleSweeper{
+		Store: st, Projects: mgr, Cmux: cmuxClient, Attention: att,
+	}
+	killIdleDone := make(chan struct{})
+	go func() {
+		defer close(killIdleDone)
+		killIdle.Run(ctx)
+	}()
+
 	// Triage worker (c302): enriches newly-raised flags via Claude
 	// shell. Disabled unless messaging.triage.enabled in config.
 	triage := &orchestrator.Triager{
@@ -441,6 +452,7 @@ func run() error {
 	<-stuckDone
 	<-dedupDone
 	<-timeTrackerDone
+	<-killIdleDone
 	for _, done := range inboundDones {
 		<-done
 	}
@@ -551,6 +563,10 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("triage.run", handleTriageRun(triage, st))
 	s.Register("estimate.run", handleEstimateRun(estimator, st))
 	s.Register("time.report", handleTimeReport(st))
+	s.Register("bookmark.list", handleBookmarkList(st))
+	s.Register("bookmark.set", handleBookmarkSet(st))
+	s.Register("bookmark.clear", handleBookmarkClear())
+	s.Register("bookmark.goto", handleBookmarkGoto(st))
 
 	// Attention pipeline: raise/list/answer/count flags + next-task actions.
 	s.Register("flag.raise", handleFlagRaise(st, att))
@@ -1228,6 +1244,118 @@ func handleTimeReport(st *store.Store) ipc.Handler {
 		// Sort by seconds DESC.
 		sort.Slice(out, func(i, j int) bool { return out[i].Seconds > out[j].Seconds })
 		return methods.TimeReportResponse{Days: days, Projects: out}, nil
+	}
+}
+
+// ---------- bookmark handlers (8e23) ----------
+
+func handleBookmarkList(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, err
+		}
+		ctx := context.Background()
+		var out []methods.BookmarkSlot
+		for slot := 1; slot <= 9; slot++ {
+			ref := cfg.Bookmarks.Slots[slot]
+			row := methods.BookmarkSlot{Slot: slot, Ref: ref}
+			if ref != "" {
+				if p, err := st.GetProject(ctx, ref); err == nil {
+					row.ProjectID = p.ID
+					row.ProjectName = p.Name
+					row.ProjectPath = p.Path
+				}
+			}
+			out = append(out, row)
+		}
+		return methods.BookmarkListResponse{Slots: out}, nil
+	}
+}
+
+func handleBookmarkSet(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.BookmarkSetRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.Slot < 1 || req.Slot > 9 {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "slot must be 1..9"}
+		}
+		if req.Ref == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "ref required"}
+		}
+		p, err := st.GetProject(context.Background(), req.Ref)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Bookmarks.Slots == nil {
+			cfg.Bookmarks.Slots = map[int]string{}
+		}
+		// Persist by NAME (stable across id churn if the user later
+		// re-registers a project with the same name in a different path).
+		cfg.Bookmarks.Slots[req.Slot] = p.Name
+		if err := config.Save(cfg); err != nil {
+			return nil, err
+		}
+		return methods.BookmarkSetResponse{Slot: req.Slot, ProjectID: p.ID, ProjectName: p.Name}, nil
+	}
+}
+
+func handleBookmarkClear() ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.BookmarkClearRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.Slot < 1 || req.Slot > 9 {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "slot must be 1..9"}
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, err
+		}
+		cleared := false
+		if _, ok := cfg.Bookmarks.Slots[req.Slot]; ok {
+			delete(cfg.Bookmarks.Slots, req.Slot)
+			if err := config.Save(cfg); err != nil {
+				return nil, err
+			}
+			cleared = true
+		}
+		return methods.BookmarkClearResponse{Cleared: cleared}, nil
+	}
+}
+
+func handleBookmarkGoto(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.BookmarkGotoRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.Slot < 1 || req.Slot > 9 {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "slot must be 1..9"}
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, err
+		}
+		ref := cfg.Bookmarks.Slots[req.Slot]
+		if ref == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInternal, Message: fmt.Sprintf("bookmark slot %d is empty; set it with `chief bookmark set %d <project>`", req.Slot, req.Slot)}
+		}
+		p, err := st.GetProject(context.Background(), ref)
+		if err != nil {
+			return nil, err
+		}
+		_ = st.InsertEvent(context.Background(), p.ID, "", "bookmark.goto", map[string]any{"slot": req.Slot})
+		return methods.BookmarkGotoResponse{
+			Slot: req.Slot, ProjectID: p.ID, ProjectName: p.Name, ProjectPath: p.Path,
+		}, nil
 	}
 }
 

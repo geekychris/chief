@@ -449,6 +449,52 @@ type CodeGraphOpenResponse struct {
 	Mode string `json:"mode"`
 }
 
+// ---------- bookmarks (8e23) ----------
+
+type BookmarkListRequest struct{}
+type BookmarkListResponse struct {
+	Slots []BookmarkSlot `json:"slots"`
+}
+
+// BookmarkSlot is one entry in the bookmark table. Ref is the raw
+// string from config.yaml (name/id/path); ProjectID + ProjectName are
+// resolved server-side (empty when the ref doesn't map to a known
+// project — likely a rename/removal since it was bookmarked).
+type BookmarkSlot struct {
+	Slot        int    `json:"slot"`
+	Ref         string `json:"ref"`
+	ProjectID   string `json:"project_id,omitempty"`
+	ProjectName string `json:"project_name,omitempty"`
+	ProjectPath string `json:"project_path,omitempty"`
+}
+
+type BookmarkSetRequest struct {
+	Slot int    `json:"slot"`
+	Ref  string `json:"ref"` // project id / name / path
+}
+type BookmarkSetResponse struct {
+	Slot        int    `json:"slot"`
+	ProjectID   string `json:"project_id"`
+	ProjectName string `json:"project_name"`
+}
+
+type BookmarkClearRequest struct {
+	Slot int `json:"slot"`
+}
+type BookmarkClearResponse struct {
+	Cleared bool `json:"cleared"`
+}
+
+type BookmarkGotoRequest struct {
+	Slot int `json:"slot"`
+}
+type BookmarkGotoResponse struct {
+	Slot        int    `json:"slot"`
+	ProjectID   string `json:"project_id"`
+	ProjectName string `json:"project_name"`
+	ProjectPath string `json:"project_path"`
+}
+
 // ---------- undo.list / undo.restore ----------
 
 type UndoListRequest struct {

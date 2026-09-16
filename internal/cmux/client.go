@@ -180,6 +180,17 @@ func (c *Client) SendAndRun(ctx context.Context, surfaceRef, text string) error 
 	return c.SendKey(ctx, surfaceRef, "enter")
 }
 
+// CloseSurface asks cmux to close (terminate) the surface at surfaceRef.
+// Used by the idle-Claude killer (1b72). No-op if the surface is already
+// gone — cmux returns an error we treat as success.
+func (c *Client) CloseSurface(ctx context.Context, surfaceRef string) error {
+	if surfaceRef == "" {
+		return errors.New("CloseSurface: surfaceRef required")
+	}
+	_, err := c.run(ctx, "close-surface", "--surface", surfaceRef)
+	return err
+}
+
 // run executes cmux with args, returning stdout. Errors include stderr for
 // debugging. Uses c.Timeout (default 5s). Password (if any) is passed as the
 // first global flag before the subcommand.

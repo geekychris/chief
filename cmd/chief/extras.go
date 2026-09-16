@@ -282,6 +282,141 @@ func timeReportCmd() *cobra.Command {
 	return cmd
 }
 
+// ---------- bookmarks (8e23) ----------
+
+func bookmarkCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "bookmark",
+		Short: "Pin projects to slots 1..9 for `chief goto <N>` + Chief.app ⌘1..⌘9.",
+	}
+	cmd.AddCommand(bookmarkListCmd(), bookmarkSetCmd(), bookmarkClearCmd())
+	return cmd
+}
+
+func bookmarkListCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "Show all 9 bookmark slots (empty slots included).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.BookmarkListResponse
+			if err := c.Call("bookmark.list", methods.BookmarkListRequest{}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			for _, s := range resp.Slots {
+				switch {
+				case s.Ref == "":
+					fmt.Printf("  ⌘%d  (empty)\n", s.Slot)
+				case s.ProjectID == "":
+					fmt.Printf("  ⌘%d  %s  ← stale (project not registered)\n", s.Slot, s.Ref)
+				default:
+					fmt.Printf("  ⌘%d  %s  (%s)\n", s.Slot, s.ProjectName, s.ProjectPath)
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON")
+	return cmd
+}
+
+func bookmarkSetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "set <slot 1-9> <project>",
+		Short: "Assign a project to a bookmark slot.",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var slot int
+			if _, err := fmt.Sscanf(args[0], "%d", &slot); err != nil {
+				return fmt.Errorf("slot must be 1..9")
+			}
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.BookmarkSetResponse
+			if err := c.Call("bookmark.set", methods.BookmarkSetRequest{Slot: slot, Ref: args[1]}, &resp); err != nil {
+				return err
+			}
+			fmt.Printf("⌘%d → %s\n", resp.Slot, resp.ProjectName)
+			return nil
+		},
+	}
+	return cmd
+}
+
+func bookmarkClearCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "clear <slot 1-9>",
+		Short: "Remove the bookmark from a slot.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var slot int
+			if _, err := fmt.Sscanf(args[0], "%d", &slot); err != nil {
+				return fmt.Errorf("slot must be 1..9")
+			}
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.BookmarkClearResponse
+			if err := c.Call("bookmark.clear", methods.BookmarkClearRequest{Slot: slot}, &resp); err != nil {
+				return err
+			}
+			if resp.Cleared {
+				fmt.Printf("cleared ⌘%d\n", slot)
+			} else {
+				fmt.Printf("⌘%d was already empty\n", slot)
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+func gotoCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "goto <slot 1-9>",
+		Short: "Print details for the bookmarked project (Chief.app also focuses its main window).",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var slot int
+			if _, err := fmt.Sscanf(args[0], "%d", &slot); err != nil {
+				return fmt.Errorf("slot must be 1..9")
+			}
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.BookmarkGotoResponse
+			if err := c.Call("bookmark.goto", methods.BookmarkGotoRequest{Slot: slot}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			fmt.Printf("⌘%d → %s\n", resp.Slot, resp.ProjectName)
+			fmt.Printf("  id:   %s\n", resp.ProjectID)
+			fmt.Printf("  path: %s\n", resp.ProjectPath)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON")
+	return cmd
+}
+
 func humanDur2(d time.Duration) string {
 	if d < time.Hour {
 		return fmt.Sprintf("%dm", int(d.Minutes()))

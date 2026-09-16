@@ -48,6 +48,8 @@ type ProjectFile struct {
 	// for its release order. Consumed by `chief deps-graph`; not enforced
 	// by any workflow gate (yet).
 	DependsOn []string `yaml:"depends_on,omitempty"`
+	// KillIdle (1b72) tunes the idle-Claude killer per project.
+	KillIdle KillIdleCfg `yaml:"kill_idle,omitempty"`
 }
 
 // StuckCfg controls the stuck-task suggester per project.
@@ -60,6 +62,20 @@ type StuckCfg struct {
 	// default (48h).
 	SentHours int `yaml:"sent_hours,omitempty"`
 	Disable   bool `yaml:"disable,omitempty"`
+}
+
+// KillIdleCfg (1b72) gates the idle-Claude killer per project.
+// The killer targets cmux surfaces where IsClaude=true and the surface's
+// title hasn't changed for AfterHours. Default is prompt-only (raises an
+// urgent flag); AutoClose=true makes chief invoke `cmux close-surface`
+// without asking.
+type KillIdleCfg struct {
+	// AfterHours: threshold before a Claude surface is considered idle
+	// for kill purposes. 0 → global default (4h). Different from
+	// IdleCfg.TimeoutMinutes which is for the "possibly idle" info flag.
+	AfterHours int  `yaml:"after_hours,omitempty"`
+	AutoClose  bool `yaml:"auto_close,omitempty"`
+	Disable    bool `yaml:"disable,omitempty"`
 }
 
 // MessagingCfg is a per-project override of the global messaging
@@ -563,6 +579,11 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 	if err != nil {
 		return nil, err
 	}
+	// Capture the pre-rescan state so external edits (fswatch → Rescan)
+	// AND completedlog.md sweeps produced by rescan are recoverable via
+	// `chief undo`. InsertBacklogSnapshot dedups by content hash, so
+	// consecutive rescans with no on-disk change don't grow the table.
+	m.snapshotBefore(projectID, "rescan")
 	backlogPath := filepath.Join(proj.Path, "backlog.md")
 	completedPath := filepath.Join(proj.Path, "completedlog.md")
 	droppedPath := filepath.Join(proj.Path, "dropped.md")

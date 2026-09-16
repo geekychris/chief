@@ -57,6 +57,8 @@ func main() {
 		triageCmd(),
 		estimateCmd(),
 		timeReportCmd(),
+		bookmarkCmd(),
+		gotoCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
