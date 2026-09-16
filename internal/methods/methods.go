@@ -142,6 +142,39 @@ type TaskReorderResponse struct {
 	Applied bool       `json:"applied"` // false = no-op (task already at edge of its section)
 }
 
+// ---------- historyviewer.status / install / open ----------
+
+type HistoryViewerStatusRequest struct{}
+type HistoryViewerStatusResponse struct {
+	Installed  bool   `json:"installed"`
+	Binary     string `json:"binary,omitempty"`
+	HasBrew    bool   `json:"has_brew"`
+	InstallURL string `json:"install_url"`
+}
+
+type HistoryViewerInstallRequest struct{}
+type HistoryViewerInstallResponse struct {
+	OK         bool     `json:"ok"`
+	CLIPath    string   `json:"cli_path,omitempty"`
+	Log        string   `json:"log"`
+	Steps      []string `json:"steps"`
+	DurationMS int64    `json:"duration_ms"`
+	Error      string   `json:"error,omitempty"`
+}
+
+// HistoryViewerOpenRequest kicks off the viewer scoped to a project directory.
+// If IDOrPath is provided, the project's on-disk path is used as --filter-dir.
+type HistoryViewerOpenRequest struct {
+	IDOrPath string `json:"id_or_path"`
+}
+
+type HistoryViewerOpenResponse struct {
+	URL      string `json:"url"`      // the URL Chief opened in the browser
+	FilterDir string `json:"filter_dir"`
+	Port     int    `json:"port"`
+	Spawned  bool   `json:"spawned"`  // true = we launched a fresh process; false = existing instance reused
+}
+
 // ---------- analyzer.install ----------
 
 // AnalyzerInstallRequest kicks off the analyzer install (clone + go build).

@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -31,6 +33,7 @@ import (
 	"github.com/geekychris/chief/internal/cmux"
 	"github.com/geekychris/chief/internal/config"
 	"github.com/geekychris/chief/internal/fswatch"
+	"github.com/geekychris/chief/internal/historyviewer"
 	"github.com/geekychris/chief/internal/installer"
 	"github.com/geekychris/chief/internal/ipc"
 	"github.com/geekychris/chief/internal/methods"
@@ -245,6 +248,10 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("task.send", handleTaskSend(cmuxClient, mgr, st))
 	s.Register("project.sessions", handleProjectSessions(mgr))
 	s.Register("analyzer.install", handleAnalyzerInstall())
+
+	s.Register("historyviewer.status", handleHistoryViewerStatus())
+	s.Register("historyviewer.install", handleHistoryViewerInstall())
+	s.Register("historyviewer.open", handleHistoryViewerOpen(mgr))
 }
 
 // ---------- analyzer.install ----------
@@ -262,6 +269,90 @@ func handleAnalyzerInstall() ipc.Handler {
 			Log: r.Log, Steps: r.Steps, DurationMS: r.DurationMS, Error: r.Error,
 		}, nil
 	}
+}
+
+// ---------- historyviewer handlers ----------
+
+const historyViewerRepoURL = "https://github.com/geekychris/history_viewer"
+
+func handleHistoryViewerStatus() ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		installed, bin := historyviewer.IsInstalled()
+		return methods.HistoryViewerStatusResponse{
+			Installed: installed, Binary: bin,
+			HasBrew: historyviewer.HomebrewAvailable(),
+			InstallURL: historyViewerRepoURL,
+		}, nil
+	}
+}
+
+func handleHistoryViewerInstall() ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		r := installer.InstallHistoryViewer(ctx)
+		return methods.HistoryViewerInstallResponse{
+			OK: r.OK, CLIPath: r.CLIPath, Log: r.Log,
+			Steps: r.Steps, DurationMS: r.DurationMS, Error: r.Error,
+		}, nil
+	}
+}
+
+// handleHistoryViewerOpen ensures a viewer instance is up on DefaultPort
+// (spawns one if not), then returns the deep-link URL for the requested
+// project. The Wails frontend opens that URL in the default browser.
+func handleHistoryViewerOpen(mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.HistoryViewerOpenRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.IDOrPath == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "id_or_path required"}
+		}
+		p, err := mgr.Store.GetProject(context.Background(), req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		bin := historyviewer.BinaryPath()
+		if bin == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInternal, Message: "history_viewer is not installed; run historyviewer.install first"}
+		}
+		port := historyviewer.DefaultPort
+		spawned := false
+		if !viewerAlive(port) {
+			// Spawn detached; server prints its own startup line to stderr.
+			cmd := exec.Command(bin,
+				"--ui", "web",
+				"--port", fmt.Sprintf("%d", port),
+				"--filter-dir", p.Path,
+			)
+			cmd.Env = os.Environ()
+			if err := cmd.Start(); err != nil {
+				return nil, fmt.Errorf("spawn history_viewer: %w", err)
+			}
+			spawned = true
+			// Poll for the server to come up (10s cap).
+			deadline := time.Now().Add(10 * time.Second)
+			for !viewerAlive(port) && time.Now().Before(deadline) {
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+		u := fmt.Sprintf("http://127.0.0.1:%d/?dir=%s", port, url.QueryEscape(p.Path))
+		return methods.HistoryViewerOpenResponse{
+			URL: u, FilterDir: p.Path, Port: port, Spawned: spawned,
+		}, nil
+	}
+}
+
+// viewerAlive probes whether history_viewer is already serving on the port.
+func viewerAlive(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // ---------- project.sessions ----------

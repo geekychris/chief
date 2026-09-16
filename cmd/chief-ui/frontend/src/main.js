@@ -9,6 +9,7 @@ import {
   GetProjectSessions, RevealInFinder, OpenPath, OpenURL,
   OpenClaudeTrace, OpenClaudeTraceForProject,
   InstallAnalyzer,
+  HistoryViewerStatus, InstallHistoryViewer, OpenHistoryViewer,
 } from '../wailsjs/go/main/App';
 
 // -------- state --------
@@ -75,6 +76,9 @@ const els = {
   pmSessionsHint: $('pm-sessions-hint'),
   btnOpenTrace: $('btn-open-trace'),
   btnOpenSessionsDir: $('btn-open-sessions-dir'),
+  // History-viewer block
+  btnOpenHistory: $('btn-open-history'),
+  pmHistoryHint: $('pm-history-hint'),
   // Modal: install progress
   modalInstall: $('modal-install'),
   installStatus: $('install-status'),
@@ -113,6 +117,7 @@ els.btnOpenTrace.addEventListener('click', openTraceForCurrentProject);
 els.btnOpenSessionsDir.addEventListener('click', () => {
   if (currentSessions?.sessions_dir) OpenPath(currentSessions.sessions_dir);
 });
+els.btnOpenHistory.addEventListener('click', openHistoryForCurrentProject);
 els.btnInstallStart.addEventListener('click', runAnalyzerInstall);
 els.btnInstallClose.addEventListener('click', () => els.modalInstall.classList.add('hidden'));
 document.addEventListener('keydown', (e) => {
@@ -250,6 +255,37 @@ async function openTraceForCurrentProject() {
     await OpenClaudeTraceForProject(currentSessions.slug || '', currentSessions.sessions_dir);
   } else {
     openInstallModal();
+  }
+}
+
+// -------- history_viewer (jump to zsh history filtered by project dir) --------
+
+async function openHistoryForCurrentProject() {
+  const projectID = state.selectedProject;
+  if (!projectID) return;
+  try {
+    const status = await HistoryViewerStatus();
+    if (!status.installed) {
+      if (!confirm('history_viewer is not installed. Install it now (via brew or source)?')) return;
+      els.pmHistoryHint.classList.remove('hidden');
+      els.pmHistoryHint.textContent = 'Installing history_viewer…';
+      const r = await InstallHistoryViewer();
+      if (!r.ok) {
+        els.pmHistoryHint.textContent = 'Install failed: ' + (r.error || 'unknown') + ' — see logs (' + Math.round(r.duration_ms / 1000) + 's)';
+        console.error('history_viewer install log:\n' + r.log);
+        return;
+      }
+      els.pmHistoryHint.textContent = 'Installed ' + (r.cli_path || '') + ' (' + Math.round(r.duration_ms / 1000) + 's); opening…';
+    } else {
+      els.pmHistoryHint.classList.add('hidden');
+    }
+    const open = await OpenHistoryViewer(projectID);
+    els.pmHistoryHint.classList.remove('hidden');
+    els.pmHistoryHint.textContent = `Opened ${open.url}  (${open.spawned ? 'spawned new instance' : 'reused running instance'})`;
+  } catch (e) {
+    console.error('history viewer open failed', e);
+    els.pmHistoryHint.classList.remove('hidden');
+    els.pmHistoryHint.textContent = 'Failed: ' + (e.message || e);
   }
 }
 

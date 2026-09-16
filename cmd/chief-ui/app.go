@@ -392,6 +392,55 @@ func (a *App) InstallAnalyzer() (methods.AnalyzerInstallResponse, error) {
 	return resp, nil
 }
 
+// HistoryViewerStatus reports whether the zsh history viewer is installed.
+func (a *App) HistoryViewerStatus() (methods.HistoryViewerStatusResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.HistoryViewerStatusResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.HistoryViewerStatusResponse
+	if err := c.Call("historyviewer.status", methods.HistoryViewerStatusRequest{}, &resp); err != nil {
+		return methods.HistoryViewerStatusResponse{}, err
+	}
+	return resp, nil
+}
+
+// InstallHistoryViewer runs the viewer install (brew if available, else
+// clone+go build). Blocks until done (typically 5-30s).
+func (a *App) InstallHistoryViewer() (methods.HistoryViewerInstallResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.HistoryViewerInstallResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.HistoryViewerInstallResponse
+	if err := c.Call("historyviewer.install", methods.HistoryViewerInstallRequest{}, &resp); err != nil {
+		return methods.HistoryViewerInstallResponse{}, err
+	}
+	return resp, nil
+}
+
+// OpenHistoryViewer spawns (or reuses) the viewer scoped to the project's
+// directory and opens the deep-link URL in the default browser.
+func (a *App) OpenHistoryViewer(projectID string) (methods.HistoryViewerOpenResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.HistoryViewerOpenResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.HistoryViewerOpenResponse
+	if err := c.Call("historyviewer.open", methods.HistoryViewerOpenRequest{IDOrPath: projectID}, &resp); err != nil {
+		return methods.HistoryViewerOpenResponse{}, err
+	}
+	// Fire the browser from Chief's side (macOS `open` respects the default
+	// browser). Best-effort — errors here don't invalidate the RPC result.
+	if resp.URL != "" {
+		_ = execOpen(resp.URL)
+	}
+	return resp, nil
+}
+
 // ReadProjectFile returns the raw text of a specific file (constitution.md,
 // PROJECT.md, etc.) inside a registered project. Restricted to a whitelist so
 // the UI can't turn into an arbitrary file reader.
