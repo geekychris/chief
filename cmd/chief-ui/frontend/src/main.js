@@ -562,7 +562,14 @@ function renderSidebar() {
 }
 
 function renderBacklog() {
-  if (!state.tasks || state.tasks.length === 0) {
+  // Hide dropped items from the "all" view — they're archived; user has to
+  // explicitly filter by "dropped" to see them.  Otherwise a fresh drop
+  // stays visible (styled dim/strikethrough) and reads as "delete didn't
+  // work" even though the row moved to dropped.md.
+  const visible = state.statusFilter === ''
+    ? (state.tasks || []).filter(t => t.status !== 'dropped')
+    : (state.tasks || []);
+  if (visible.length === 0) {
     els.backlogBody.innerHTML = `<tr><td colspan="8" class="empty">no tasks match</td></tr>`;
     updateBatchToolbar();
     return;
@@ -571,7 +578,7 @@ function renderBacklog() {
   // non-done items in backlog.md. Precompute per-project neighbours so
   // ↑/↓ can be disabled at section edges.
   const projectView = !!state.selectedProject;
-  els.backlogBody.innerHTML = state.tasks.map((t, i) => {
+  els.backlogBody.innerHTML = visible.map((t, i) => {
     const glyph = statusGlyph(t.status);
     const sel = t.id === state.selectedTaskId ? ' selected' : '';
     const titleTruncated = t.title.length > 80 ? t.title.slice(0, 77) + '…' : t.title;
@@ -580,8 +587,8 @@ function renderBacklog() {
     const checked = state.batchSelection.has(t.id) ? 'checked' : '';
     let reorderHTML = '';
     if (showReorder) {
-      const prev = state.tasks[i - 1];
-      const next = state.tasks[i + 1];
+      const prev = visible[i - 1];
+      const next = visible[i + 1];
       const canUp   = !!prev && prev.status === t.status && (prev.category || '') === (t.category || '') && prev.source_file === 'backlog.md';
       const canDown = !!next && next.status === t.status && (next.category || '') === (t.category || '') && next.source_file === 'backlog.md';
       reorderHTML = `
@@ -641,14 +648,16 @@ function updateBatchToolbar() {
     els.btnSendSelected.classList.add('hidden');
   }
   // Update select-all checkbox tri-state.
-  const checkable = state.tasks.filter(t => t.status !== 'done' && t.source_file === 'backlog.md');
+  const checkable = (state.tasks || []).filter(
+    t => t.status !== 'done' && t.status !== 'dropped' && t.source_file === 'backlog.md');
   const selectedInView = checkable.filter(t => state.batchSelection.has(t.id));
   els.selectAll.indeterminate = selectedInView.length > 0 && selectedInView.length < checkable.length;
   els.selectAll.checked = checkable.length > 0 && selectedInView.length === checkable.length;
 }
 
 function toggleSelectAll(check) {
-  const checkable = state.tasks.filter(t => t.status !== 'done' && t.source_file === 'backlog.md');
+  const checkable = (state.tasks || []).filter(
+    t => t.status !== 'done' && t.status !== 'dropped' && t.source_file === 'backlog.md');
   checkable.forEach(t => {
     if (check) state.batchSelection.add(t.id);
     else state.batchSelection.delete(t.id);
@@ -728,11 +737,20 @@ async function deleteCurrentTask() {
     return;
   }
   if (!confirm(`Drop task ${t.id}?\n\n${t.title}\n\nRemoves from backlog.md and archives to dropped.md.`)) return;
+  const droppedId = t.id;
   try {
-    await DeleteTask(t.id);
+    await DeleteTask(droppedId);
     state.selectedTaskId = '';
-    state.batchSelection.delete(t.id);
+    state.batchSelection.delete(droppedId);
     els.detail.classList.add('hidden');
+    // Optimistic UI: strip the row from local state so the visual update
+    // fires immediately, before the refreshAll roundtrip. Otherwise the
+    // fsnotify -> Rescan -> ListBacklog chain can take a beat and the
+    // row briefly stays visible, reading as "delete didn't work".
+    state.tasks = (state.tasks || []).filter(x => x.id !== droppedId);
+    renderSidebar();
+    renderBacklog();
+    // Then reconcile with the authoritative server state.
     await refreshAll();
   } catch (e) {
     alert('Drop failed: ' + (e.message || e));
