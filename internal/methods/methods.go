@@ -449,6 +449,84 @@ type CodeGraphOpenResponse struct {
 	Mode string `json:"mode"`
 }
 
+// ---------- undo.list / undo.restore ----------
+
+type UndoListRequest struct {
+	IDOrPath string `json:"id_or_path"`
+	Limit    int    `json:"limit,omitempty"` // default 20
+}
+type UndoListResponse struct {
+	Snapshots []UndoSnapshot `json:"snapshots"`
+}
+type UndoSnapshot struct {
+	ID            int64     `json:"id"`
+	Ts            time.Time `json:"ts"`
+	Reason        string    `json:"reason"`
+	BacklogHash   string    `json:"backlog_hash"`
+	CompletedHash string    `json:"completed_hash"`
+}
+
+type UndoRestoreRequest struct {
+	SnapshotID int64 `json:"snapshot_id"`
+	DryRun     bool  `json:"dry_run,omitempty"`
+}
+type UndoRestoreResponse struct {
+	Restored        bool   `json:"restored"`
+	ProjectPath     string `json:"project_path"`
+	BacklogBytes    int    `json:"backlog_bytes"`
+	CompletedBytes  int    `json:"completed_bytes"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+// ---------- deps.graph ----------
+
+type DepsGraphRequest struct{}
+type DepsGraphResponse struct {
+	Graph any `json:"graph"` // orchestrator.DepsGraph — kept opaque here to avoid an import cycle
+}
+
+// ---------- triage.run / estimate.run (manual invocation) ----------
+
+type TriageRunRequest struct {
+	FlagID string `json:"flag_id"`
+}
+type TriageRunResponse struct {
+	Applied  bool   `json:"applied"`
+	Summary  string `json:"summary,omitempty"`
+	Urgency  string `json:"urgency,omitempty"`
+	Related  string `json:"related,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type EstimateRunRequest struct {
+	TaskID string `json:"task_id"`
+}
+type EstimateRunResponse struct {
+	Applied  bool   `json:"applied"`
+	Size     string `json:"size,omitempty"`
+	Priority int    `json:"priority,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// ---------- time.report ----------
+
+type TimeReportRequest struct {
+	Days int `json:"days,omitempty"` // default 7
+}
+type TimeReportResponse struct {
+	Days     int                  `json:"days"`
+	Projects []TimeProjectSummary `json:"projects"`
+}
+type TimeProjectSummary struct {
+	ProjectID   string  `json:"project_id"`
+	ProjectName string  `json:"project_name"`
+	Seconds     int64   `json:"seconds"`
+	Hours       float64 `json:"hours"`
+	LastActive  *time.Time `json:"last_active,omitempty"`
+}
+
 // ---------- briefing.preview / briefing.fire ----------
 
 type BriefingPreviewRequest struct{}

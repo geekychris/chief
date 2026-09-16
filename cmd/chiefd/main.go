@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -290,6 +291,93 @@ func run() error {
 		sessionWatch.Run(ctx)
 	}()
 
+	// Stuck-task sweeper (d2d9): raise attention flags for tasks past
+	// per-project SLA.
+	stuck := &orchestrator.StuckSweeper{Store: st, Projects: mgr, Attention: att}
+	stuckDone := make(chan struct{})
+	go func() {
+		defer close(stuckDone)
+		stuck.Run(ctx)
+	}()
+
+	// Dedup sweeper (9b5f): pairwise Jaccard on pending titles across
+	// every project; raise info flags on likely dups.
+	dedup := &orchestrator.DedupSweeper{Store: st, Attention: att}
+	dedupDone := make(chan struct{})
+	go func() {
+		defer close(dedupDone)
+		dedup.Run(ctx)
+	}()
+
+	// cmux client (shared between the time tracker and the RPC handlers
+	// registered later inside registerMethods).
+	cmuxClient := &cmux.Client{
+		Password: cfg.Cmux.SocketPassword,
+		Socket:   cfg.Cmux.SocketPath,
+	}
+
+	// Time tracker (3206): sample cmux surfaces every 60s, attribute
+	// wall-clock to whichever project owns each Claude-hosting surface's
+	// cwd. Feeds `chief cost` + morning briefing.
+	timeTracker := &orchestrator.TimeTracker{Store: st, Cmux: cmuxClient}
+	timeTrackerDone := make(chan struct{})
+	go func() {
+		defer close(timeTrackerDone)
+		timeTracker.Run(ctx)
+	}()
+
+	// Triage worker (c302): enriches newly-raised flags via Claude
+	// shell. Disabled unless messaging.triage.enabled in config.
+	triage := &orchestrator.Triager{
+		Store:   st,
+		Claude:  &orchestrator.ClaudeShell{Bin: cfg.Messaging.Triage.ClaudeBin},
+		Enabled: cfg.Messaging.Triage.Enabled,
+		Timeout: time.Duration(cfg.Messaging.Triage.TimeoutSec) * time.Second,
+	}
+	if triage.Enabled {
+		att.PostRaiseHook = func(flagID string) {
+			if err := triage.Triage(context.Background(), flagID); err != nil {
+				slog.Debug("triage failed", "flag", flagID, "err", err)
+			}
+		}
+		slog.Info("triage enabled")
+	}
+
+	// Estimator (8fa3): sizes newly-added tasks via Claude shell.
+	// Disabled unless messaging.estimator.enabled in config.
+	estimator := &orchestrator.Estimator{
+		Store:   st,
+		Claude:  &orchestrator.ClaudeShell{Bin: cfg.Messaging.Estimator.ClaudeBin},
+		Enabled: cfg.Messaging.Estimator.Enabled,
+		Timeout: time.Duration(cfg.Messaging.Estimator.TimeoutSec) * time.Second,
+	}
+	if estimator.Enabled {
+		mgr.PostTaskAddHook = func(taskID string) {
+			if err := estimator.Estimate(context.Background(), taskID); err != nil {
+				slog.Debug("estimator failed", "task", taskID, "err", err)
+			}
+		}
+		slog.Info("estimator enabled")
+	}
+
+	// Rollback snapshot hook (e4ef): capture backlog+completedlog
+	// content before every explicit mutation. Dedup-by-hash inside
+	// InsertBacklogSnapshot skips no-ops.
+	mgr.PreMutationSnapshot = func(projectID, reason string) {
+		proj, err := st.GetProject(context.Background(), projectID)
+		if err != nil {
+			return
+		}
+		backlog, _ := os.ReadFile(filepath.Join(proj.Path, "backlog.md"))
+		completed, _ := os.ReadFile(filepath.Join(proj.Path, "completedlog.md"))
+		_, _, _ = st.InsertBacklogSnapshot(context.Background(), store.BacklogSnapshot{
+			ProjectID:     projectID,
+			Reason:        reason,
+			BacklogBody:   string(backlog),
+			CompletedBody: string(completed),
+		})
+	}
+
 	// Morning briefing (12da): opinionated "top N tasks to focus on
 	// today" pushed via messaging router at a scheduled time. Disabled
 	// by default; enable in config.yaml under messaging.briefing.
@@ -311,7 +399,7 @@ func run() error {
 	}()
 
 	srv := ipc.NewServer()
-	registerMethods(srv, st, mgr, watcher, att, cfg, digest, lint, briefing)
+	registerMethods(srv, st, mgr, watcher, att, cfg, digest, lint, briefing, cmuxClient, triage, estimator)
 
 	slog.Info("chiefd started", "socket", sockPath, "version", Version, "pid", os.Getpid())
 
@@ -350,6 +438,9 @@ func run() error {
 	<-lintDone
 	<-sessionWatchDone
 	<-briefingDone
+	<-stuckDone
+	<-dedupDone
+	<-timeTrackerDone
 	for _, done := range inboundDones {
 		<-done
 	}
@@ -402,7 +493,7 @@ func setupLogger() (*slog.Logger, func(), error) {
 
 // registerMethods wires the per-milestone method surface. Handlers close over
 // the store/manager/watcher via method-level factories to avoid globals.
-func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config, digest *orchestrator.DigestSweeper, lint *orchestrator.LintSweeper, briefing *orchestrator.MorningBriefer) {
+func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config, digest *orchestrator.DigestSweeper, lint *orchestrator.LintSweeper, briefing *orchestrator.MorningBriefer, cmuxClient *cmux.Client, triage *orchestrator.Triager, estimator *orchestrator.Estimator) {
 	s.Register("ping", handlePing)
 	s.Register("project.add", handleProjectAdd(st, mgr, w))
 	s.Register("project.list", handleProjectList(st))
@@ -430,12 +521,8 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("task.delete", handleTaskDelete(mgr))
 
 	// cmux integration (Feature B — send task to a running Claude pane).
-	// Shares cfg with the sweeper wired in run() so both use the same
-	// socket auth.
-	cmuxClient := &cmux.Client{
-		Password: cfg.Cmux.SocketPassword,
-		Socket:   cfg.Cmux.SocketPath,
-	}
+	// cmuxClient is created in run() (shared with TimeTracker) and
+	// passed in here so both use the same socket auth.
 	s.Register("cmux.list", handleCmuxList(cmuxClient))
 	s.Register("cmux.candidates", handleCmuxCandidates(cmuxClient, mgr))
 	s.Register("cmux.bind", handleCmuxBind(mgr))
@@ -458,6 +545,12 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 
 	s.Register("cmux.direct_send", handleCmuxDirectSend(cmuxClient, mgr))
 	s.Register("focus.enter", handleFocusEnter(mgr, att))
+	s.Register("undo.list", handleUndoList(st))
+	s.Register("undo.restore", handleUndoRestore(st, mgr))
+	s.Register("deps.graph", handleDepsGraph(st, mgr))
+	s.Register("triage.run", handleTriageRun(triage, st))
+	s.Register("estimate.run", handleEstimateRun(estimator, st))
+	s.Register("time.report", handleTimeReport(st))
 
 	// Attention pipeline: raise/list/answer/count flags + next-task actions.
 	s.Register("flag.raise", handleFlagRaise(st, att))
@@ -927,6 +1020,214 @@ func handleFocusEnter(mgr *project.Manager, att *attention.Manager) ipc.Handler 
 			FocusedProject: target.Name, Minutes: req.Minutes,
 			SnoozedOthers: snoozed, Until: until,
 		}, nil
+	}
+}
+
+// ---------- undo handlers (e4ef) ----------
+
+func handleUndoList(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.UndoListRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.IDOrPath == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "id_or_path required"}
+		}
+		ctx := context.Background()
+		p, err := st.GetProject(ctx, req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		snaps, err := st.ListBacklogSnapshots(ctx, p.ID, req.Limit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]methods.UndoSnapshot, 0, len(snaps))
+		for _, sn := range snaps {
+			out = append(out, methods.UndoSnapshot{
+				ID: sn.ID, Ts: sn.Ts, Reason: sn.Reason,
+				BacklogHash: sn.BacklogHash, CompletedHash: sn.CompletedHash,
+			})
+		}
+		return methods.UndoListResponse{Snapshots: out}, nil
+	}
+}
+
+func handleUndoRestore(st *store.Store, mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.UndoRestoreRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.SnapshotID == 0 {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "snapshot_id required"}
+		}
+		ctx := context.Background()
+		snap, err := st.GetBacklogSnapshot(ctx, req.SnapshotID)
+		if err != nil {
+			return nil, err
+		}
+		p, err := st.GetProject(ctx, snap.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		resp := methods.UndoRestoreResponse{
+			ProjectPath:    p.Path,
+			BacklogBytes:   len(snap.BacklogBody),
+			CompletedBytes: len(snap.CompletedBody),
+			Reason:         snap.Reason,
+		}
+		if req.DryRun {
+			return resp, nil
+		}
+		// Take a fresh snapshot BEFORE overwriting so the current state
+		// is itself recoverable via undo — a mis-clicked undo can be
+		// undone.
+		mgr.PreMutationSnapshot(snap.ProjectID, "undo.pre-restore")
+		if err := os.WriteFile(filepath.Join(p.Path, "backlog.md"), []byte(snap.BacklogBody), 0o644); err != nil {
+			return nil, err
+		}
+		// Only touch completedlog.md if the snapshot captured one.
+		if snap.CompletedBody != "" {
+			if err := os.WriteFile(filepath.Join(p.Path, "completedlog.md"), []byte(snap.CompletedBody), 0o644); err != nil {
+				return nil, err
+			}
+		}
+		// Force a rescan so the DB matches disk.
+		if _, err := mgr.Rescan(ctx, p.ID); err != nil {
+			return nil, err
+		}
+		_ = st.InsertEvent(ctx, p.ID, "", "undo.restored", map[string]any{
+			"snapshot_id": snap.ID, "reason": snap.Reason,
+		})
+		resp.Restored = true
+		return resp, nil
+	}
+}
+
+// ---------- deps.graph handler (a452) ----------
+
+func handleDepsGraph(st *store.Store, mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		g, err := orchestrator.BuildDepsGraph(context.Background(), st, mgr)
+		if err != nil {
+			return nil, err
+		}
+		return methods.DepsGraphResponse{Graph: g}, nil
+	}
+}
+
+// ---------- triage.run / estimate.run handlers ----------
+
+func handleTriageRun(t *orchestrator.Triager, st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.TriageRunRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.FlagID == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "flag_id required"}
+		}
+		// Force enabled=true for manual invocation regardless of config.
+		manual := *t
+		manual.Enabled = true
+		ctx := context.Background()
+		if err := manual.Triage(ctx, req.FlagID); err != nil {
+			return methods.TriageRunResponse{Error: err.Error()}, nil
+		}
+		meta, _ := st.GetFlagMetadata(ctx, req.FlagID)
+		resp := methods.TriageRunResponse{Applied: true}
+		if v, ok := meta["triage_summary"].(string); ok {
+			resp.Summary = v
+		}
+		if v, ok := meta["triage_urgency"].(string); ok {
+			resp.Urgency = v
+		}
+		if v, ok := meta["triage_related"].(string); ok {
+			resp.Related = v
+		}
+		if v, ok := meta["triage_reasoning"].(string); ok {
+			resp.Reason = v
+		}
+		return resp, nil
+	}
+}
+
+func handleEstimateRun(e *orchestrator.Estimator, st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.EstimateRunRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.TaskID == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "task_id required"}
+		}
+		manual := *e
+		manual.Enabled = true
+		ctx := context.Background()
+		if err := manual.Estimate(ctx, req.TaskID); err != nil {
+			return methods.EstimateRunResponse{Error: err.Error()}, nil
+		}
+		meta, _ := st.GetTaskMetadata(ctx, req.TaskID)
+		resp := methods.EstimateRunResponse{Applied: true}
+		if v, ok := meta["estimate_size"].(string); ok {
+			resp.Size = v
+		}
+		if v, ok := meta["estimate_priority"].(float64); ok {
+			resp.Priority = int(v)
+		}
+		if v, ok := meta["estimate_reason"].(string); ok {
+			resp.Reason = v
+		}
+		return resp, nil
+	}
+}
+
+// ---------- time.report handler (3206) ----------
+
+func handleTimeReport(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.TimeReportRequest
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &req)
+		}
+		days := req.Days
+		if days <= 0 {
+			days = 7
+		}
+		ctx := context.Background()
+		since := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+		sums, err := st.SumTimeSamplesSince(ctx, since)
+		if err != nil {
+			return nil, err
+		}
+		last, _ := st.LastActivePerProject(ctx)
+		projs, err := st.ListProjects(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]methods.TimeProjectSummary, 0, len(projs))
+		for _, p := range projs {
+			secs := sums[p.ID]
+			if secs == 0 {
+				continue
+			}
+			row := methods.TimeProjectSummary{
+				ProjectID:   p.ID,
+				ProjectName: p.Name,
+				Seconds:     secs,
+				Hours:       float64(secs) / 3600,
+			}
+			if t, ok := last[p.ID]; ok {
+				tt := t
+				row.LastActive = &tt
+			}
+			out = append(out, row)
+		}
+		// Sort by seconds DESC.
+		sort.Slice(out, func(i, j int) bool { return out[i].Seconds > out[j].Seconds })
+		return methods.TimeReportResponse{Days: days, Projects: out}, nil
 	}
 }
 

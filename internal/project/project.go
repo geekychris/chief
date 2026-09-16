@@ -42,6 +42,24 @@ type ProjectFile struct {
 	Messaging  MessagingCfg  `yaml:"messaging,omitempty"`
 	AutoBranch AutoBranchCfg `yaml:"autobranch,omitempty"`
 	PRGate     PRGateCfg     `yaml:"pr_gate,omitempty"`
+	// Stuck (d2d9) tunes the stuck-task suggester on a per-project basis.
+	Stuck StuckCfg `yaml:"stuck,omitempty"`
+	// DependsOn (a452) lists project names/ids this project depends on
+	// for its release order. Consumed by `chief deps-graph`; not enforced
+	// by any workflow gate (yet).
+	DependsOn []string `yaml:"depends_on,omitempty"`
+}
+
+// StuckCfg controls the stuck-task suggester per project.
+type StuckCfg struct {
+	// ActiveHours: mark a task stuck if it's been in 'active' longer than
+	// this. 0 → global default (24h).
+	ActiveHours int `yaml:"active_hours,omitempty"`
+	// SentHours: mark a task stuck if the most recent task.sent event for
+	// it is older than this and the task hasn't completed. 0 → global
+	// default (48h).
+	SentHours int `yaml:"sent_hours,omitempty"`
+	Disable   bool `yaml:"disable,omitempty"`
 }
 
 // MessagingCfg is a per-project override of the global messaging
@@ -114,6 +132,18 @@ type Manager struct {
 	// into done. Leaving it nil disables the suggestion notification
 	// (existing tests + tools that don't want side channels stay pure).
 	Attention *attention.Manager
+	// PreMutationSnapshot is a best-effort callback invoked BEFORE any
+	// mutation to a project's backlog.md/completedlog.md. Wired at
+	// chiefd boot to the store's backlog-snapshot table (e4ef). The
+	// reason string ("task.add", "task.update", "task.delete",
+	// "task.reorder", "rescan") lets `chief undo` show a meaningful
+	// audit trail. Errors are swallowed so a snapshot failure never
+	// blocks a real mutation.
+	PreMutationSnapshot func(projectID, reason string)
+	// PostTaskAddHook is invoked (async) after a new task is created —
+	// wired to the Estimator (8fa3) so newly-added tasks get an S/M/L
+	// size + priority suggestion in task_metadata.
+	PostTaskAddHook func(taskID string)
 }
 
 // New returns a Manager bound to the given store. The watcher is optional;
@@ -262,6 +292,7 @@ func (m *Manager) AddTask(ctx context.Context, projectID string, opts AddTaskOpt
 		return store.Task{}, err
 	}
 	backlogPath := filepath.Join(proj.Path, "backlog.md")
+	m.snapshotBefore(proj.ID, "task.add")
 
 	original, err := os.ReadFile(backlogPath)
 	if err != nil {
@@ -318,7 +349,23 @@ func (m *Manager) AddTask(ctx context.Context, projectID string, opts AddTaskOpt
 	}
 	_ = m.Store.InsertEvent(ctx, proj.ID, "", "task.added",
 		map[string]any{"id": id, "title": opts.Title, "priority": opts.Priority})
+	if m.PostTaskAddHook != nil {
+		tid := id
+		go m.PostTaskAddHook(tid)
+	}
 	return t, nil
+}
+
+// snapshotBefore is a no-op if PreMutationSnapshot is unwired; otherwise
+// it calls the hook so the caller can capture a rollback point.
+// Non-blocking / never returns an error — snapshot failures MUST NOT
+// stop real mutations.
+func (m *Manager) snapshotBefore(projectID, reason string) {
+	if m.PreMutationSnapshot == nil {
+		return
+	}
+	defer func() { _ = recover() }() // paranoia
+	m.PreMutationSnapshot(projectID, reason)
 }
 
 // UpdateTaskOpts is what UpdateTask consumes; nil Body pointer means "don't
@@ -353,6 +400,7 @@ func (m *Manager) UpdateTask(ctx context.Context, taskID string, opts UpdateTask
 		return store.Task{}, fmt.Errorf("task %s lives in %s; only backlog.md items are editable", taskID, t.SourceFile)
 	}
 	backlogPath := filepath.Join(proj.Path, "backlog.md")
+	m.snapshotBefore(proj.ID, "task.update")
 	content, err := os.ReadFile(backlogPath)
 	if err != nil {
 		return store.Task{}, fmt.Errorf("read %s: %w", backlogPath, err)
@@ -405,6 +453,7 @@ func (m *Manager) DeleteTaskWithReason(ctx context.Context, taskID, reason strin
 	}
 	backlogPath := filepath.Join(proj.Path, "backlog.md")
 	droppedPath := filepath.Join(proj.Path, "dropped.md")
+	m.snapshotBefore(proj.ID, "task.delete")
 
 	backlogContent, err := os.ReadFile(backlogPath)
 	if err != nil {
@@ -465,6 +514,7 @@ func (m *Manager) MoveTask(ctx context.Context, taskID, direction string) (store
 		return store.Task{}, err
 	}
 	backlogPath := filepath.Join(proj.Path, "backlog.md")
+	m.snapshotBefore(proj.ID, "task.reorder")
 	content, err := os.ReadFile(backlogPath)
 	if err != nil {
 		return store.Task{}, err

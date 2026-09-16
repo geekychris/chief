@@ -61,6 +61,13 @@ type Manager struct {
 	// routing excludes info).
 	Router *messaging.Router
 
+	// PostRaiseHook is a best-effort async callback invoked with the
+	// flag ID of a NEWLY-created (non-coalesced) flag. Wired at
+	// chiefd boot to the Triager (c302) so newly-raised flags get
+	// enriched by Claude. Errors are swallowed — this is a background
+	// task, never blocks Raise().
+	PostRaiseHook func(flagID string)
+
 	// snoozeUntil tracks per-project "hold notifications" cursors set via
 	// Snooze(). Reset on chiefd restart, which is fine — snoozes are
 	// meant to be short (minutes to hours). Not persisted to avoid a
@@ -146,6 +153,11 @@ func (m *Manager) Raise(ctx context.Context, opts RaiseOpts) (RaiseResult, error
 	}
 	if err := m.Store.InsertFlag(ctx, f); err != nil {
 		return RaiseResult{}, fmt.Errorf("insert flag: %w", err)
+	}
+	if m.PostRaiseHook != nil {
+		// Async so Claude latency (or a hung shell) never blocks the caller.
+		id := f.ID
+		go m.PostRaiseHook(id)
 	}
 	return m.notify(ctx, f, false, opts, now)
 }

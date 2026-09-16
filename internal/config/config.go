@@ -52,6 +52,28 @@ type MessagingConfig struct {
 	// Briefing: opinionated morning message with "top N tasks to focus
 	// on today". More prescriptive than Digest — see MorningBriefer.
 	Briefing BriefingConfig `yaml:"briefing,omitempty"`
+	// Triage (c302): shell Claude to enrich newly-raised flags with
+	// a 1-line summary, suggested urgency reclass, and grouping hint.
+	// Costs one Claude call per new flag; disabled by default.
+	Triage TriageConfig `yaml:"triage,omitempty"`
+	// Estimator (8fa3): shell Claude to size newly-added tasks (S/M/L)
+	// + suggest a priority. One Claude call per task.add; opt-in.
+	Estimator EstimatorConfig `yaml:"estimator,omitempty"`
+}
+
+// TriageConfig gates the auto-triage worker (c302). Enabled=false → no
+// Claude calls happen (existing flag flow is unchanged).
+type TriageConfig struct {
+	Enabled    bool   `yaml:"enabled,omitempty"`
+	ClaudeBin  string `yaml:"claude_bin,omitempty"`  // default "claude"
+	TimeoutSec int    `yaml:"timeout_sec,omitempty"` // default 30
+}
+
+// EstimatorConfig gates the task-add estimator (8fa3).
+type EstimatorConfig struct {
+	Enabled    bool   `yaml:"enabled,omitempty"`
+	ClaudeBin  string `yaml:"claude_bin,omitempty"`
+	TimeoutSec int    `yaml:"timeout_sec,omitempty"`
 }
 
 // BriefingConfig configures the morning briefing (12da). Disabled by

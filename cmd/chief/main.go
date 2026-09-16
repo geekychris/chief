@@ -52,6 +52,11 @@ func main() {
 		costCmd(),
 		syncCmd(),
 		constitutionCmd(),
+		undoCmd(),
+		depsGraphCmd(),
+		triageCmd(),
+		estimateCmd(),
+		timeReportCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

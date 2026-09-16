@@ -27,7 +27,7 @@ var schemaSQL string
 
 // currentSchemaVersion is the PRAGMA user_version we expect after migrations.
 // Bump this and add a branch in migrate() when the schema changes.
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // Store wraps *sql.DB and provides typed DAO methods.
 type Store struct {
@@ -138,6 +138,55 @@ CREATE TABLE IF NOT EXISTS flags (
 		}
 		if _, err := tx.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]'`); err != nil {
 			return fmt.Errorf("apply v4 (blocked_by): %w", err)
+		}
+	}
+
+	// v4 → v5: snapshots + metadata + time samples. Enables e4ef
+	// (rollback safety net), c302 (flag triage metadata), 8fa3 (task
+	// estimator metadata), and 3206 (time tracking).
+	if v < 5 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS backlog_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    ts           TEXT NOT NULL,
+    reason       TEXT NOT NULL DEFAULT '',          -- task.add|task.update|task.delete|task.reorder|rescan|manual
+    backlog_hash TEXT NOT NULL,
+    backlog_body TEXT NOT NULL,
+    completed_hash TEXT NOT NULL DEFAULT '',
+    completed_body TEXT NOT NULL DEFAULT ''
+)`); err != nil {
+			return fmt.Errorf("apply v5 (backlog_snapshots): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS snapshots_project_ts ON backlog_snapshots(project_id, ts)`); err != nil {
+			return fmt.Errorf("apply v5 (snapshot index): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS task_metadata (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    data    TEXT NOT NULL DEFAULT '{}'              -- JSON object
+)`); err != nil {
+			return fmt.Errorf("apply v5 (task_metadata): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS flag_metadata (
+    flag_id TEXT PRIMARY KEY REFERENCES flags(id) ON DELETE CASCADE,
+    data    TEXT NOT NULL DEFAULT '{}'
+)`); err != nil {
+			return fmt.Errorf("apply v5 (flag_metadata): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS project_time_samples (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    ts          TEXT NOT NULL,                      -- end of the sample window
+    seconds     INTEGER NOT NULL,                   -- duration attributed
+    source      TEXT NOT NULL DEFAULT ''            -- cmux|claudetrace|manual
+)`); err != nil {
+			return fmt.Errorf("apply v5 (project_time_samples): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS time_samples_project_ts ON project_time_samples(project_id, ts)`); err != nil {
+			return fmt.Errorf("apply v5 (time index): %w", err)
 		}
 	}
 
