@@ -1,5 +1,6 @@
 # Completed
 
+- [x] {id:2350} jumping to zhistory does not filter by project [category:Backlog] (done 2026-09-15)
 - [x] {id:8340} I want the ability to not just send to cmux claude but run it [category:Backlog] (done 2026-09-15)
 - [x] {id:c50a} update the zhistory tool to use wails [category:Backlog] (done 2026-09-15)
 - [x] {id:1017} I would also like to be able to jump to the z history viewer and immediately filter by the project directory I am in [category:Backlog] (done 2026-09-15)
