@@ -1,5 +1,7 @@
 # Completed
 
+- [x] {id:e0f5} Menu-bar counter of pending attention items across all projects [category:Attention & notifications] (done 2026-09-16 03:44)
+- [x] {id:02a6} Unified "next up" queue across all projects [priority:5] [category:Multi-project coordination] (done 2026-09-16 03:44)
 - [x] {id:1241} Idle-session detection + auto-recovery [category:Multi-project coordination] (done 2026-09-16 03:39)
 - [x] {id:2af2} Backlog templates (`chief task new --template feature|bug|refactor`) [category:Agentic ergonomics] (done 2026-09-16 03:39)
 - [x] {id:e155} Bulk task import — "paste a bunch of ideas, chief splits" [category:Agentic ergonomics] (done 2026-09-16 03:39)

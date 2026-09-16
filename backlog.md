@@ -1,8 +1,6 @@
 ## Backlog
 
 ## Attention & notifications
-- [ ] {id:e0f5} Menu-bar counter of pending attention items across all projects
-  Extend `chief-menu`'s badge to show total flag count and the top-of-queue project name. Click opens the answer inbox.
 - [ ] {id:535c} Per-project + global Do-Not-Disturb schedule [priority:med]
   Config lets me set "no pokes or notifications between 22:00–08:00", globally or per project. Notifications queue silently during DND and drain on lift.
 
@@ -31,8 +29,6 @@
   Which urgency → which backend(s). Example: `urgent → telegram+macos; attention → telegram; info → macos-only`. Per-project overrides in `.chief/project.yaml`.
 
 ## Multi-project coordination
-- [ ] {id:02a6} Unified "next up" queue across all projects [priority:high]
-  Rank pending tasks system-wide by (priority DESC, age ASC, resource-availability). CLI: `chief next --any`; UI shows top 10 with a one-click "assign to Project X's session". Solves "which project should I focus on right now?".
 - [ ] {id:c09c} Cross-project full-text search across all backlogs [priority:med]
   `chief search "auth"` returns matching tasks with project + status + category. Backed by SQLite FTS5.
 - [ ] {id:ad14} Task dependencies (blocks / blocked-by) [priority:med]

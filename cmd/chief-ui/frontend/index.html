@@ -13,6 +13,7 @@
       <span class="brand-name">Chief</span>
     </div>
     <div class="toolbar">
+      <button id="btn-next-up" title="Top pending tasks across all projects, ranked by priority">Next Up</button>
       <button id="btn-inbox" title="Attention inbox — answer flagged questions + approve/skip next-task suggestions">
         Inbox<span id="inbox-badge" class="inbox-badge hidden">0</span>
       </button>
@@ -178,6 +179,20 @@
       <div class="modal-actions">
         <button id="btn-install-start" class="primary">Start install</button>
         <button id="btn-install-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Next Up — cross-project priority queue -->
+  <div id="modal-nextup" class="modal hidden">
+    <div class="modal-card wide">
+      <h2>Next Up <span id="nextup-count-label" class="inbox-count-label"></span></h2>
+      <p class="modal-hint">Top pending tasks across every registered project, ranked by priority (highest first) then doc order. Click <em>Send</em> to inject the task into its project's cmux Claude pane.</p>
+      <div id="nextup-list" class="inbox-list">
+        <div class="empty">Loading…</div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-nextup-close">Close</button>
       </div>
     </div>
   </div>

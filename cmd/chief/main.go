@@ -224,7 +224,50 @@ func backlogCmd() *cobra.Command {
 		Use:   "backlog",
 		Short: "Query the merged backlog across projects",
 	}
-	cmd.AddCommand(backlogListCmd())
+	cmd.AddCommand(backlogListCmd(), backlogNextCmd())
+	return cmd
+}
+
+func backlogNextCmd() *cobra.Command {
+	var limit int
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "next",
+		Short: "Show the top pending tasks ranked across all projects.",
+		Long: `Rank across ALL projects by (priority DESC, source_line ASC).
+Answers "which project should I focus on right now?".`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.BacklogNextResponse
+			if err := c.Call("backlog.next", methods.BacklogNextRequest{Limit: limit}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			if len(resp.Tasks) == 0 {
+				fmt.Println("no pending tasks anywhere")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "RANK\tID\tPRIO\tPROJECT\tCATEGORY\tTITLE")
+			for i, r := range resp.Tasks {
+				title := r.Title
+				if len(title) > 60 {
+					title = title[:57] + "..."
+				}
+				fmt.Fprintf(tw, "%d\t%s\t%d\t%s\t%s\t%s\n",
+					i+1, r.ID, r.Priority, r.ProjectName, r.Category, title)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().IntVar(&limit, "limit", 10, "how many tasks to return")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
 	return cmd
 }
 

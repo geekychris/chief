@@ -260,6 +260,7 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("project.remove", handleProjectRemove(mgr, w))
 	s.Register("project.rescan", handleProjectRescan(mgr))
 	s.Register("backlog.list", handleBacklogList(st))
+	s.Register("backlog.next", handleBacklogNext(st))
 	s.Register("task.show", handleTaskShow(st))
 	s.Register("task.add", handleTaskAdd(mgr))
 	s.Register("task.update", handleTaskUpdate(mgr))
@@ -1253,6 +1254,43 @@ func handleBacklogList(st *store.Store) ipc.Handler {
 			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
 		}
 		return methods.BacklogListResponse{Tasks: rows}, nil
+	}
+}
+
+// ---------- backlog.next ----------
+
+// handleBacklogNext returns the top-N pending tasks system-wide ranked
+// by (priority DESC, source_line ASC). Powers `chief backlog next` +
+// the UI's Next Up modal.
+func handleBacklogNext(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.BacklogNextRequest
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &req); err != nil {
+				return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+			}
+		}
+		limit := req.Limit
+		if limit <= 0 {
+			limit = 10
+		}
+		ctx := context.Background()
+		tasks, err := st.NextPending(ctx, limit)
+		if err != nil {
+			return nil, err
+		}
+		// Enrich with project names in one pass.
+		nameByID := map[string]string{}
+		if projs, err := st.ListProjects(ctx); err == nil {
+			for _, p := range projs {
+				nameByID[p.ID] = p.Name
+			}
+		}
+		rows := make([]methods.BacklogRow, 0, len(tasks))
+		for _, t := range tasks {
+			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
+		}
+		return methods.BacklogNextResponse{Tasks: rows}, nil
 	}
 }
 

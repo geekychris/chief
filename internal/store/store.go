@@ -412,6 +412,41 @@ func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 	return out, rows.Err()
 }
 
+// NextPending returns the top-N pending tasks across ALL projects ranked
+// by (priority DESC, source_line ASC, created_at ASC). This powers the
+// "which project should I focus on right now" view — the CLI subcommand
+// `chief backlog next` and the UI's Next Up modal.
+//
+// Only status='pending' tasks are returned; active/blocked/deferred/done/
+// dropped are excluded. limit ≤ 0 means "no limit" (returns everything).
+func (s *Store) NextPending(ctx context.Context, limit int) ([]Task, error) {
+	q := `
+		SELECT id, project_id, title, body, source_file, source_line_hash,
+		       source_line, status, priority, category, required_resources, due,
+		       claimed_at, claimed_by_session, revive_count,
+		       created_at, completed_at
+		  FROM tasks
+		 WHERE status = 'pending'
+		 ORDER BY priority DESC, source_line ASC, created_at ASC`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // GetTask returns a single task by id.
 func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 	row := s.db.QueryRowContext(ctx, `

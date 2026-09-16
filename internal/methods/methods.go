@@ -71,6 +71,18 @@ type BacklogRow struct {
 	ProjectName string `json:"project_name"`
 }
 
+// ---------- backlog.next ----------
+
+// BacklogNextRequest asks for the top-N pending tasks system-wide, ranked
+// by (priority DESC, source_line ASC). Limit 0 uses server default (10).
+type BacklogNextRequest struct {
+	Limit int `json:"limit,omitempty"`
+}
+
+type BacklogNextResponse struct {
+	Tasks []BacklogRow `json:"tasks"`
+}
+
 // ---------- task.show ----------
 
 type TaskShowRequest struct {

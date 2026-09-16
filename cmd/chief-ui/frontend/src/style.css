@@ -460,3 +460,4 @@ button.danger:hover { background: var(--bad); color: #14141a; }
   font-size: 12px;
 }
 .flag-actions button.primary { background: var(--accent-2); color: #0a0a10; border-color: var(--accent-2); font-weight: 600; }
+.rank-num { color: var(--accent); font-weight: 700; }

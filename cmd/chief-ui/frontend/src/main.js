@@ -12,6 +12,7 @@ import {
   HistoryViewerStatus, InstallHistoryViewer, OpenHistoryViewer,
   ListFlags, CountOpenFlags, AnswerFlag,
   ApproveNextTask, SkipNextTask, SnoozeNextTask,
+  NextUp,
 } from '../wailsjs/go/main/App';
 
 // -------- state --------
@@ -100,6 +101,12 @@ const els = {
   inboxList: $('inbox-list'),
   inboxCountLabel: $('inbox-count-label'),
   btnInboxClose: $('btn-inbox-close'),
+  // Next Up modal
+  btnNextUp: $('btn-next-up'),
+  modalNextUp: $('modal-nextup'),
+  nextUpList: $('nextup-list'),
+  nextUpCountLabel: $('nextup-count-label'),
+  btnNextUpClose: $('btn-nextup-close'),
 };
 
 // Current sessions payload (set by loadProjectDocs).
@@ -138,6 +145,8 @@ els.btnInstallStart.addEventListener('click', runAnalyzerInstall);
 els.btnInstallClose.addEventListener('click', () => els.modalInstall.classList.add('hidden'));
 els.btnInbox.addEventListener('click', openInbox);
 els.btnInboxClose.addEventListener('click', () => els.modalInbox.classList.add('hidden'));
+els.btnNextUp.addEventListener('click', openNextUp);
+els.btnNextUpClose.addEventListener('click', () => els.modalNextUp.classList.add('hidden'));
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
     e.preventDefault();
@@ -318,6 +327,121 @@ async function actOnNext(kind, flagID, minutes = 0) {
 function escapeHTML(s) {
   if (s == null) return '';
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---- Next Up: cross-project ranked queue.
+// "Which project should I focus on right now?" answered as a top-10
+// list ranked by (priority DESC, source_line ASC). One-click Send
+// injects the task into that project's bound cmux surface.
+
+async function openNextUp() {
+  els.modalNextUp.classList.remove('hidden');
+  await renderNextUp();
+}
+
+async function renderNextUp() {
+  els.nextUpList.innerHTML = '<div class="empty">Loading…</div>';
+  let rows = [];
+  try {
+    rows = await NextUp(10);
+  } catch (e) {
+    els.nextUpList.innerHTML = `<div class="empty">error: ${e}</div>`;
+    return;
+  }
+  els.nextUpCountLabel.textContent = rows.length === 0
+    ? '(nothing pending)'
+    : `(top ${rows.length})`;
+  if (!rows || rows.length === 0) {
+    els.nextUpList.innerHTML = '<div class="empty">No pending tasks anywhere. Add one to a project\'s backlog.md.</div>';
+    return;
+  }
+  els.nextUpList.innerHTML = '';
+  rows.forEach((r, i) => {
+    els.nextUpList.appendChild(renderNextUpCard(r, i + 1));
+  });
+}
+
+function renderNextUpCard(row, rank) {
+  const card = document.createElement('div');
+  // Reuse the inbox card styling with a priority-tinted stripe.
+  const urgencyClass = row.priority >= 5 ? 'urgency-urgent'
+    : row.priority >= 3 ? 'urgency-attention'
+    : 'urgency-info';
+  card.className = `flag-card ${urgencyClass}`;
+
+  const head = document.createElement('div');
+  head.className = 'flag-head';
+  head.innerHTML =
+    `<span><span class="rank-num">#${rank}</span> · <span class="flag-project">${escapeHTML(row.project_name || '(unknown)')}</span></span>` +
+    `<span>prio ${row.priority} · ${escapeHTML(row.category || 'Backlog')} · id ${escapeHTML(row.id)}</span>`;
+  card.appendChild(head);
+
+  const title = document.createElement('div');
+  title.className = 'flag-body';
+  title.textContent = row.title;
+  card.appendChild(title);
+
+  if (row.body) {
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'body';
+    summary.style.color = 'var(--text-dim)';
+    summary.style.cursor = 'pointer';
+    summary.style.fontSize = '11px';
+    details.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.textContent = row.body;
+    pre.style.whiteSpace = 'pre-wrap';
+    pre.style.fontSize = '12px';
+    pre.style.color = 'var(--text-dim)';
+    pre.style.margin = '4px 0 0 0';
+    details.appendChild(pre);
+    card.appendChild(details);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'flag-actions';
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'primary';
+  sendBtn.textContent = 'Send → cmux';
+  sendBtn.title = 'Inject this task into its project\'s bound cmux Claude pane';
+  sendBtn.addEventListener('click', () => sendNextUp(row));
+  const openBtn = document.createElement('button');
+  openBtn.textContent = 'Open';
+  openBtn.title = 'Switch to this project and select the task';
+  openBtn.addEventListener('click', async () => {
+    els.modalNextUp.classList.add('hidden');
+    await selectProject(row.project_id);
+    await showTaskDetail(row.id);
+  });
+  actions.append(sendBtn, openBtn);
+  card.appendChild(actions);
+  return card;
+}
+
+async function sendNextUp(row) {
+  // Reuse the single-task send RPC — the same needs_binding path opens
+  // the cmux picker if the project isn't bound yet.
+  try {
+    const res = await SendTask(row.id, '');
+    if (res.ok) {
+      showToast(`Sent → ${res.surface_ref}`);
+      // Optional: refresh the list so a done-transition removes the row.
+      await renderNextUp();
+      return;
+    }
+    if (res.needs_binding || res.surface_gone) {
+      // Hop the picker over — this reuses openCmuxPicker which sends
+      // once a surface is chosen. Persist state so we know which
+      // task we're binding for.
+      state.selectedTaskId = row.id;
+      openCmuxPicker(res.candidates, row.id);
+      return;
+    }
+    showToast('Send failed: ' + (res.error || 'unknown'), true);
+  } catch (e) {
+    showToast('Send failed: ' + (e.message || e), true);
+  }
 }
 
 async function updateStatus() {

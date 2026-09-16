@@ -537,6 +537,21 @@ func (a *App) ReadProjectFile(projectID, filename string) (string, error) {
 	return string(b), nil
 }
 
+// NextUp returns the top-N pending tasks across all projects, ranked
+// (priority DESC, source_line ASC). Powers the Next Up modal.
+func (a *App) NextUp(limit int) ([]methods.BacklogRow, error) {
+	c, err := a.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	var resp methods.BacklogNextResponse
+	if err := c.Call("backlog.next", methods.BacklogNextRequest{Limit: limit}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tasks, nil
+}
+
 // ---------- flags (attention inbox) ----------
 
 // ListFlags returns attention flags across projects. openOnly filters to
