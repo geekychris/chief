@@ -133,12 +133,14 @@
 
   <!-- Modal: edit task -->
   <div id="modal-edit" class="modal hidden">
-    <div class="modal-card">
-      <h2>Edit task <code id="edit-id" class="task-id-chip"></code></h2>
+    <div class="modal-card wide resizable edit-modal">
+      <h2>Edit task <code id="edit-id" class="task-id-chip"></code>
+        <span class="modal-resize-hint" title="Drag the bottom-right corner to resize">⤡</span>
+      </h2>
       <div class="modal-row"><label>Title</label><input id="edit-title" type="text"/></div>
       <div class="modal-row"><label>Category</label><input id="edit-category" type="text" placeholder="(section header)"/></div>
       <div class="modal-row"><label>Priority</label><input id="edit-priority" type="number" min="-9" max="9"/></div>
-      <div class="modal-row"><label>Body</label><textarea id="edit-body" rows="4" placeholder="(indented sub-bullets in backlog.md; clear to remove)"></textarea></div>
+      <div class="modal-row edit-body-row"><label>Body</label><textarea id="edit-body" rows="14" placeholder="(indented sub-bullets in backlog.md; clear to remove)"></textarea></div>
       <div class="modal-actions">
         <button id="btn-edit-cancel">Cancel</button>
         <button id="btn-edit-save" class="primary">Save changes</button>
