@@ -287,17 +287,39 @@ func (a *App) OpenClaudeTrace(fallbackDir string) error {
 	return a.OpenClaudeTraceForProject("", fallbackDir)
 }
 
-// OpenClaudeTraceForProject launches the analyzer with --project <slug> so it
-// deep-links straight to that project's view (requires analyzer commit dc4cf19
-// or later). We invoke the .app's inner binary directly because macOS `open
-// --args` doesn't reliably forward flags to Wails apps via LaunchServices.
+// OpenClaudeTraceForProject opens the analyzer at the given project. Prefers
+// redirecting an already-running instance (via /api/v1/navigate) so the user
+// doesn't get a second window; only spawns a fresh process when no live
+// instance is detected.
 //
-// If the analyzer isn't installed, falls back to revealing the sessions dir.
+// Redirect requires analyzer commit with the navigate endpoint (see
+// PortFilePath + /api/v1/navigate). Deep-link launch requires analyzer commit
+// dc4cf19 or later. Falls back to opening the sessions dir if neither works.
 func (a *App) OpenClaudeTraceForProject(projectSlug, fallbackDir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	// 1. Already running? Redirect it in place.
+	if addr, alive := claudetrace.RunningInstance(ctx); alive {
+		nav := claudetrace.NavDashboard()
+		if projectSlug != "" {
+			nav = claudetrace.NavProject(projectSlug)
+		}
+		if err := claudetrace.Navigate(ctx, addr, nav); err == nil {
+			// Bring the app forward from Chief's side too — Wails
+			// WindowShow inside the analyzer handles it, but this belt-
+			// and-suspenders `open -a` doesn't hurt if that's a no-op.
+			_ = execOpen("-a", "claude-trace")
+			return nil
+		}
+		// Navigate failed (endpoint missing on older binary, etc.).
+		// Fall through and launch a fresh instance.
+	}
+
+	// 2. Not running (or old binary): launch fresh with --project.
 	binPath := claudetrace.AnalyzerAppBinary()
 	if binPath == "" {
-		// No .app; try the CLI as a graceful fallback (opens the CLI-based
-		// dashboard indirectly via `ct` — user still gets something).
+		// No .app; try the CLI as a graceful fallback.
 		if _, err := exec.LookPath("ct"); err == nil {
 			if projectSlug != "" {
 				return exec.Command("ct", "sessions", projectSlug).Start()
@@ -313,7 +335,6 @@ func (a *App) OpenClaudeTraceForProject(projectSlug, fallbackDir string) error {
 	if projectSlug != "" {
 		args = append(args, "--project", projectSlug)
 	}
-	// Detach the child so it survives if chief-ui goes away.
 	cmd := exec.Command(binPath, args...)
 	cmd.Env = os.Environ()
 	return cmd.Start()
