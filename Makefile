@@ -23,7 +23,7 @@ APP_BUNDLE_UI    := Chief.app
 UI_BUILT_APP     := cmd/chief-ui/build/bin/Chief.app
 WAILS            := $(shell go env GOPATH)/bin/wails
 
-.PHONY: all build build-chief build-chiefd build-chief-menu build-chief-ui app-bundle-menu app-bundle-ui install-app tidy test install install-menu install-ui install-all uninstall uninstall-menu uninstall-ui run-daemon reload reload-menu clean
+.PHONY: all build build-chief build-chiefd build-chief-menu build-chief-ui app-bundle-menu app-bundle-ui install-app tidy test install install-menu install-ui install-ui-quick install-all uninstall uninstall-menu uninstall-ui run-daemon reload reload-menu clean
 
 all: build
 
@@ -90,6 +90,29 @@ install-ui: app-bundle-ui
 	cp -R $(UI_BUILT_APP) $(APPS_DIR)/
 	@echo "Chief.app installed at $(APPS_DIR)/$(APP_BUNDLE_UI)."
 	@echo "Launched a fresh instance:"
+	@open -a Chief 2>/dev/null || true
+
+# Fast install path — skips `wails build`, which sometimes hangs on this
+# repo's bindings generator. Uses plain `go build -tags "desktop,production"`
+# and drops the binary into the .app with the name Info.plist expects
+# (Chief). Also mirrors it to `chief-ui` for greppability. Rebuilds the
+# frontend via Vite so any main.js/index.html changes ship.
+#
+# The binary MUST be named `Chief` — CFBundleExecutable in Info.plist
+# points there. Historic bug: dropping the file as `chief-ui` alongside
+# the existing `Chief` looks like an install but macOS ignores it and
+# keeps launching the old binary, leading to hours of "why isn't my UI
+# updating?" confusion.
+install-ui-quick:
+	cd cmd/chief-ui/frontend && npm run build
+	CGO_LDFLAGS="-framework UniformTypeIdentifiers -Wl,-no_warn_duplicate_libraries" \
+		go build -tags "desktop,production" -ldflags "-w -s $(LDFLAGS)" \
+		-o /tmp/chief-ui-quick ./cmd/chief-ui
+	@mkdir -p "$(APPS_DIR)/$(APP_BUNDLE_UI)/Contents/MacOS"
+	-@pkill -f "$(APP_BUNDLE_UI)/Contents/MacOS/Chief" 2>/dev/null; sleep 0.3
+	cp /tmp/chief-ui-quick "$(APPS_DIR)/$(APP_BUNDLE_UI)/Contents/MacOS/Chief"
+	cp /tmp/chief-ui-quick "$(APPS_DIR)/$(APP_BUNDLE_UI)/Contents/MacOS/chief-ui"
+	@echo "Chief.app installed via quick path."
 	@open -a Chief 2>/dev/null || true
 
 # Install everything (daemon, CLI, menu bar, main window) in one shot.

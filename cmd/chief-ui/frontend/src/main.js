@@ -632,13 +632,18 @@ async function submitAddTask() {
 // -------- send to cmux --------
 
 async function sendCurrentTaskToCmux(surfaceOverride = '') {
-  if (!state.selectedTaskId) return;
+  if (!state.selectedTaskId) {
+    showToast('No task selected', true);
+    return;
+  }
   try {
     const res = await SendTask(state.selectedTaskId, surfaceOverride);
     if (res.ok) {
-      // Flash a small confirmation on the button.
+      // Toast + brief button flash. Toast is the primary signal because
+      // the button flash was easy to miss (bug report: "send doesn't work").
+      showToast(`Sent → ${res.surface_ref}`);
       const prev = els.btnSendCmux.textContent;
-      els.btnSendCmux.textContent = 'Sent → ' + res.surface_ref;
+      els.btnSendCmux.textContent = 'Sent';
       setTimeout(() => { els.btnSendCmux.textContent = prev; }, 2500);
       return;
     }
@@ -646,9 +651,9 @@ async function sendCurrentTaskToCmux(surfaceOverride = '') {
       openCmuxPicker(res.candidates, state.selectedTaskId);
       return;
     }
-    alert('Send failed: ' + (res.error || 'unknown'));
+    showToast('Send failed: ' + (res.error || 'unknown'), true);
   } catch (e) {
-    alert('Send failed: ' + (e.message || e));
+    showToast('Send failed: ' + (e.message || e), true);
   }
 }
 
@@ -804,15 +809,19 @@ function renderBacklog() {
   updateBatchToolbar();
 }
 
-// updateBatchToolbar shows/hides "Send N to cmux" based on selection. The
-// batch endpoint requires all tasks to be in one project, so batch is only
-// meaningful in a per-project view. The button is hidden otherwise.
+// updateBatchToolbar shows/hides "Send N to cmux" based on selection.
+// Works across projects: if the selection spans multiple projects, the
+// button labels its cross-project split ("Send N to cmux (K projects)")
+// and sendBatchToCmux fans out one batch RPC per project group so each
+// subset lands on its own project's bound cmux surface.
 function updateBatchToolbar() {
   const count = state.batchSelection.size;
-  const projectView = !!state.selectedProject;
-  if (count > 0 && projectView) {
+  if (count > 0) {
     els.btnSendSelected.classList.remove('hidden');
-    els.btnSendSelected.textContent = `Send ${count} to cmux`;
+    const projects = countProjectsInSelection();
+    els.btnSendSelected.textContent = projects > 1
+      ? `Send ${count} to cmux (${projects} projects)`
+      : `Send ${count} to cmux`;
   } else {
     els.btnSendSelected.classList.add('hidden');
   }
@@ -822,6 +831,34 @@ function updateBatchToolbar() {
   const selectedInView = checkable.filter(t => state.batchSelection.has(t.id));
   els.selectAll.indeterminate = selectedInView.length > 0 && selectedInView.length < checkable.length;
   els.selectAll.checked = checkable.length > 0 && selectedInView.length === checkable.length;
+}
+
+// countProjectsInSelection returns the number of distinct projects
+// represented in the current batch selection. Uses whatever we have in
+// state.tasks — for the All-backlogs view this is every visible task
+// across all projects, so the lookup is complete.
+function countProjectsInSelection() {
+  const byPid = new Set();
+  const idx = Object.fromEntries((state.tasks || []).map(t => [t.id, t.project_id]));
+  for (const id of state.batchSelection) {
+    const pid = idx[id];
+    if (pid) byPid.add(pid);
+  }
+  return byPid.size;
+}
+
+// groupSelectionByProject returns { pid: [taskId, ...] } for every project
+// present in the current selection. Task IDs whose row isn't in state.tasks
+// are dropped (shouldn't happen, but defensive).
+function groupSelectionByProject() {
+  const idx = Object.fromEntries((state.tasks || []).map(t => [t.id, t.project_id]));
+  const groups = {};
+  for (const id of state.batchSelection) {
+    const pid = idx[id];
+    if (!pid) continue;
+    (groups[pid] ||= []).push(id);
+  }
+  return groups;
 }
 
 function toggleSelectAll(check) {
@@ -836,66 +873,131 @@ function toggleSelectAll(check) {
 
 async function sendBatchToCmux() {
   if (state.batchSelection.size === 0) return;
-  const ids = Array.from(state.batchSelection);
-  try {
-    const res = await SendTasksBatch(ids, '');
-    if (res.ok) {
-      const orig = els.btnSendSelected.textContent;
-      els.btnSendSelected.textContent = `Sent ${res.count} → ${res.surface_ref}`;
-      setTimeout(() => { els.btnSendSelected.textContent = orig; }, 2500);
-      state.batchSelection.clear();
-      await refreshAll();
-      return;
-    }
-    if (res.needs_binding || res.surface_gone) {
-      // Reuse the same picker as single-send. When user picks a surface,
-      // fire batch again with the override.
-      openCmuxPickerForBatch(res.candidates, ids);
-      return;
-    }
-    alert('Batch send failed: ' + (res.error || 'unknown'));
-  } catch (e) {
-    alert('Batch send failed: ' + (e.message || e));
-  }
-}
+  const groups = groupSelectionByProject();
+  const projectIDs = Object.keys(groups);
+  if (projectIDs.length === 0) return;
 
-function openCmuxPickerForBatch(cands, taskIds) {
-  if (!cands) return;
-  const matches = cands.cwd_matches || [];
-  const all = cands.all_surfaces || [];
-  const current = cands.current_surface || '';
-  els.cmuxMatchesBlock.style.display = matches.length ? '' : 'none';
-  els.cmuxMatches.innerHTML = matches.length
-    ? matches.map(s => renderSurfaceRow(s, current)).join('')
-    : '';
-  els.cmuxAll.innerHTML = all.length
-    ? all.map(s => renderSurfaceRow(s, current)).join('')
-    : '<li class="empty-hint">no cmux surfaces (is cmux running?)</li>';
-  const handler = async (li) => {
-    const ref = li.dataset.ref;
-    els.modalCmux.classList.add('hidden');
+  // Fan out: one SendTasksBatch call per project. If any group needs a
+  // cmux binding (unbound or surface gone) we serialize a picker per
+  // such project so the user picks a target for each. Groups that
+  // succeed on the first try don't need any interaction.
+  const nameByPid = Object.fromEntries((state.projects || []).map(p => [p.id, p.name]));
+  const successes = [];
+  const failures = [];
+  const needsPicker = []; // [{pid, ids, candidates, surface_gone}]
+
+  await Promise.all(projectIDs.map(async (pid) => {
+    const ids = groups[pid];
     try {
-      const res = await SendTasksBatch(taskIds, ref);
+      const res = await SendTasksBatch(ids, '');
       if (res.ok) {
-        state.batchSelection.clear();
-        await refreshAll();
+        successes.push({ pid, count: res.count, surface: res.surface_ref });
+      } else if (res.needs_binding || res.surface_gone) {
+        needsPicker.push({ pid, ids, candidates: res.candidates, surface_gone: !!res.surface_gone });
       } else {
-        alert('Batch send failed: ' + (res.error || 'unknown'));
+        failures.push({ pid, error: res.error || 'unknown' });
       }
     } catch (e) {
-      alert('Batch send failed: ' + (e.message || e));
+      failures.push({ pid, error: e.message || String(e) });
     }
-  };
-  els.cmuxMatches.querySelectorAll('li').forEach(li => {
-    if (li.classList.contains('empty-hint')) return;
-    li.addEventListener('click', () => handler(li));
-  });
-  els.cmuxAll.querySelectorAll('li').forEach(li => {
-    if (li.classList.contains('empty-hint')) return;
-    li.addEventListener('click', () => handler(li));
-  });
-  els.modalCmux.classList.remove('hidden');
+  }));
+
+  // Serialize the picker prompts so the user isn't flooded with modals.
+  for (const need of needsPicker) {
+    const name = nameByPid[need.pid] || need.pid;
+    // eslint-disable-next-line no-await-in-loop
+    const ref = await promptForCmuxSurface(need.candidates, name, need.surface_gone);
+    if (!ref) {
+      failures.push({ pid: need.pid, error: 'cancelled — no surface picked' });
+      continue;
+    }
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await SendTasksBatch(need.ids, ref);
+      if (res.ok) {
+        successes.push({ pid: need.pid, count: res.count, surface: res.surface_ref });
+      } else {
+        failures.push({ pid: need.pid, error: res.error || 'unknown' });
+      }
+    } catch (e) {
+      failures.push({ pid: need.pid, error: e.message || String(e) });
+    }
+  }
+
+  // Compose a summary toast. On mixed success/failure we still clear the
+  // successful IDs so re-clicking Send only retries the failed ones.
+  const succeededIDs = new Set(successes.flatMap(s => groups[s.pid] || []));
+  for (const id of succeededIDs) state.batchSelection.delete(id);
+
+  const sentCount = successes.reduce((n, s) => n + s.count, 0);
+  const surfacesUsed = successes.map(s => `${nameByPid[s.pid] || s.pid} → ${s.surface}`).join(', ');
+  if (failures.length === 0) {
+    showToast(`Sent ${sentCount} task(s) · ${surfacesUsed}`);
+  } else {
+    const failText = failures.map(f => `${nameByPid[f.pid] || f.pid}: ${f.error}`).join(' · ');
+    if (sentCount > 0) {
+      showToast(`Sent ${sentCount} · failed: ${failText}`, true);
+    } else {
+      showToast(`Send failed: ${failText}`, true);
+    }
+  }
+  updateBatchToolbar();
+  await refreshAll();
 }
+
+// promptForCmuxSurface renders the picker modal, waits for the user to
+// click a surface or cancel, and resolves with the ref (or null on
+// cancel). Extracted from the old openCmuxPickerForBatch so batch
+// send can await one picker per project.
+function promptForCmuxSurface(cands, projectName, surfaceGone) {
+  return new Promise((resolve) => {
+    if (!cands) { resolve(null); return; }
+    // Update modal header to name the project this picker is for.
+    const header = els.modalCmux.querySelector('h2');
+    if (header) {
+      header.textContent = surfaceGone
+        ? `Rebind cmux surface for "${projectName}"`
+        : `Pick cmux surface for "${projectName}"`;
+    }
+    const matches = cands.cwd_matches || [];
+    const all = cands.all_surfaces || [];
+    const current = cands.current_surface || '';
+    els.cmuxMatchesBlock.style.display = matches.length ? '' : 'none';
+    els.cmuxMatches.innerHTML = matches.length
+      ? matches.map(s => renderSurfaceRow(s, current)).join('')
+      : '';
+    els.cmuxAll.innerHTML = all.length
+      ? all.map(s => renderSurfaceRow(s, current)).join('')
+      : '<li class="empty-hint">no cmux surfaces (is cmux running?)</li>';
+
+    const cleanup = () => {
+      els.modalCmux.classList.add('hidden');
+      els.btnCmuxCancel.removeEventListener('click', onCancel);
+      // Detach the per-row handlers by replacing innerHTML on close is
+      // not enough — we swapped the listeners above so re-open works.
+    };
+    const onCancel = () => { cleanup(); resolve(null); };
+    els.btnCmuxCancel.addEventListener('click', onCancel);
+
+    const attach = (li) => li.addEventListener('click', () => {
+      const ref = li.dataset.ref;
+      cleanup();
+      resolve(ref);
+    });
+    els.cmuxMatches.querySelectorAll('li').forEach(li => {
+      if (li.classList.contains('empty-hint')) return;
+      attach(li);
+    });
+    els.cmuxAll.querySelectorAll('li').forEach(li => {
+      if (li.classList.contains('empty-hint')) return;
+      attach(li);
+    });
+    els.modalCmux.classList.remove('hidden');
+  });
+}
+
+// (openCmuxPickerForBatch was replaced by promptForCmuxSurface, which
+//  returns a promise so batch send can await one picker per project.)
 
 async function deleteCurrentTask() {
   if (!state.selectedTaskId) return;
