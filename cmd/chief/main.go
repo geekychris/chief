@@ -42,6 +42,7 @@ func main() {
 		nextCmd(),
 		statsCmd(),
 		searchCmd(),
+		digestCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -754,6 +755,44 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func digestCmd() *cobra.Command {
+	var send bool
+	var windowHours int
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "digest",
+		Short: "Preview the periodic rollup message; --send to fire it via configured backends.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			if send {
+				var resp methods.DigestFireResponse
+				if err := c.Call("digest.fire", methods.DigestFireRequest{WindowHours: windowHours}, &resp); err != nil {
+					return err
+				}
+				fmt.Println("digest fired")
+				return nil
+			}
+			var resp methods.DigestPreviewResponse
+			if err := c.Call("digest.preview", methods.DigestPreviewRequest{WindowHours: windowHours}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			fmt.Println(resp.Body)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&send, "send", false, "actually dispatch via configured messaging backends")
+	cmd.Flags().IntVar(&windowHours, "window", 24, "hours to look back for velocity numbers")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
 }
 
 func searchCmd() *cobra.Command {

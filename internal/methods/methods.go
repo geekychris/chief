@@ -71,6 +71,25 @@ type BacklogRow struct {
 	ProjectName string `json:"project_name"`
 }
 
+// ---------- digest.fire / digest.preview ----------
+
+// DigestPreviewRequest asks chiefd to compose (but not send) the digest.
+type DigestPreviewRequest struct {
+	WindowHours int `json:"window_hours,omitempty"`
+}
+type DigestPreviewResponse struct {
+	Body string `json:"body"`
+}
+
+// DigestFireRequest triggers the digest via the messaging router right
+// now, regardless of the scheduler.
+type DigestFireRequest struct {
+	WindowHours int `json:"window_hours,omitempty"`
+}
+type DigestFireResponse struct {
+	Sent bool `json:"sent"`
+}
+
 // ---------- search ----------
 
 type SearchRequest struct {

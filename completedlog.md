@@ -1,5 +1,10 @@
 # Completed
 
+- [x] {id:588b} Telegram backend as first implementation of the plugin arch [priority:5] [category:Messaging integrations] (done 2026-09-16 04:20)
+- [x] {id:1834} Slack backend [category:Messaging integrations] (done 2026-09-16 04:20)
+- [x] {id:218b} Daily / weekly digest notification [category:Multi-project coordination] (done 2026-09-16 04:20)
+- [x] {id:e98f} Auto-branch-per-task [category:Agentic ergonomics] (done 2026-09-16 04:20)
+- [x] {id:6fff} PR gating: don't mark task done until an associated PR is opened [category:Agentic ergonomics] (done 2026-09-16 04:20)
 - [x] {id:fe1c} Plugin architecture for messaging backends [priority:5] [category:Messaging integrations] (done 2026-09-16 04:10)
 - [x] {id:5802} ntfy.sh + Pushover backends [category:Messaging integrations] (done 2026-09-16 04:10)
 - [x] {id:9496} Message routing rules [category:Messaging integrations] (done 2026-09-16 04:10)

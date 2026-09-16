@@ -21,6 +21,7 @@ import (
 
 	"github.com/geekychris/chief/internal/attention"
 	"github.com/geekychris/chief/internal/backlog"
+	"github.com/geekychris/chief/internal/gitshim"
 	"github.com/geekychris/chief/internal/store"
 	"gopkg.in/yaml.v3"
 )
@@ -32,13 +33,15 @@ func sha256Hex(b []byte) string {
 
 // ProjectFile is the on-disk .chief/project.yaml schema.
 type ProjectFile struct {
-	ID        string      `yaml:"id"`
-	Name      string      `yaml:"name"`
-	SpawnMode string      `yaml:"spawn_mode"` // attach|headless|spawn-interactive
-	Cmux      CmuxBind    `yaml:"cmux"`
-	Idle      IdleCfg     `yaml:"idle,omitempty"`
-	DND       DNDCfg      `yaml:"dnd,omitempty"`
-	Messaging MessagingCfg `yaml:"messaging,omitempty"`
+	ID         string        `yaml:"id"`
+	Name       string        `yaml:"name"`
+	SpawnMode  string        `yaml:"spawn_mode"` // attach|headless|spawn-interactive
+	Cmux       CmuxBind      `yaml:"cmux"`
+	Idle       IdleCfg       `yaml:"idle,omitempty"`
+	DND        DNDCfg        `yaml:"dnd,omitempty"`
+	Messaging  MessagingCfg  `yaml:"messaging,omitempty"`
+	AutoBranch AutoBranchCfg `yaml:"autobranch,omitempty"`
+	PRGate     PRGateCfg     `yaml:"pr_gate,omitempty"`
 }
 
 // MessagingCfg is a per-project override of the global messaging
@@ -48,6 +51,22 @@ type MessagingCfg struct {
 	Default    []string              `yaml:"default,omitempty"`
 	PerUrgency map[string][]string   `yaml:"per_urgency,omitempty"`
 	Disable    bool                  `yaml:"disable,omitempty"`
+}
+
+// AutoBranchCfg gates the "on task.send, git switch -c chief/<id>-<slug>"
+// behaviour per project. Default: disabled globally (opt-in via
+// autobranch.enable in .chief/project.yaml).
+type AutoBranchCfg struct {
+	Enable bool `yaml:"enable,omitempty"`
+}
+
+// PRGateCfg controls whether the completion sweep checks `gh pr list`
+// before archiving [x] to completedlog.md. Modes:
+//   - "" or "off": don't check
+//   - "warn":     sweep anyway, raise info flag if no PR references chief/<id>
+//   - "block":    refuse to sweep; leave [x] in backlog.md + raise urgent flag
+type PRGateCfg struct {
+	Mode string `yaml:"mode,omitempty"`
 }
 
 // IdleCfg tunes the idle-session sweeper on a per-project basis. Zero
@@ -552,13 +571,45 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 	}
 
 	// ---- Sweep [x] items from backlog.md into completedlog.md ----
+	// PR gate (6fff): if pr_gate.mode == "warn" or "block", check
+	// gh pr list for open PRs referencing chief/<id> before archiving.
+	// warn = archive anyway, raise info flag if no PR found.
+	// block = don't archive; leave [x] in backlog + raise urgent flag.
+	pf, _ := m.ReadYAML(ctx, proj.ID)
+	prGateMode := strings.ToLower(strings.TrimSpace(pf.PRGate.Mode))
 	doneIDs := map[string]bool{}
 	sweptTasks := []backlog.Task{}
 	for _, t := range backlogTasks {
-		if t.Status == backlog.StatusDone {
-			doneIDs[t.ID] = true
-			sweptTasks = append(sweptTasks, t)
+		if t.Status != backlog.StatusDone {
+			continue
 		}
+		if prGateMode == "warn" || prGateMode == "block" {
+			hasPR, checked, _ := gitshim.HasOpenPRForTask(ctx, proj.Path, t.ID)
+			if checked && !hasPR {
+				if m.Attention != nil {
+					urg := store.UrgencyInfo
+					if prGateMode == "block" {
+						urg = store.UrgencyUrgent
+					}
+					_, _ = m.Attention.Raise(ctx, attention.RaiseOpts{
+						ProjectID: proj.ID,
+						Kind:      store.FlagKindQuestion,
+						Urgency:   urg,
+						Question: fmt.Sprintf(
+							"Task '%s' [id:%s] marked done but no open PR references chief/%s. Open one via `gh pr create --title 'chief/%s: ...'` or unset [x].",
+							t.Title, t.ID, t.ID, t.ID,
+						),
+					})
+				}
+				if prGateMode == "block" {
+					// Skip archiving; leave [x] in backlog.md so the
+					// user notices + fixes.
+					continue
+				}
+			}
+		}
+		doneIDs[t.ID] = true
+		sweptTasks = append(sweptTasks, t)
 	}
 	if len(doneIDs) > 0 {
 		// Append (newest-first) to completedlog.md, dedupe by id.

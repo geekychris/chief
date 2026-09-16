@@ -47,6 +47,25 @@ type MessagingConfig struct {
 	// Per-project overrides live in .chief/project.yaml under
 	// `messaging:`.
 	Routing RoutingConfig `yaml:"routing,omitempty"`
+	// Digest: scheduled rollup notification.
+	Digest DigestConfig `yaml:"digest,omitempty"`
+}
+
+// DigestConfig configures the daily/weekly rollup notification.
+// Disabled by default; set enabled=true + pick a schedule.
+type DigestConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty"`
+	// Time to fire in local time, HH:MM. Default: "09:00".
+	At string `yaml:"at,omitempty"`
+	// Cadence: "daily" or "weekly". Default: "daily". Weekly fires
+	// only on Monday at `at`.
+	Cadence string `yaml:"cadence,omitempty"`
+	// Backends: which messaging backends to fan out to. Empty →
+	// falls back to the routing rules for urgency=attention.
+	Backends []string `yaml:"backends,omitempty"`
+	// WindowHours: how far back to look for "recent completions".
+	// Default: 24 for daily, 168 for weekly.
+	WindowHours int `yaml:"window_hours,omitempty"`
 }
 
 // BackendConfig is one entry under messaging.backends.

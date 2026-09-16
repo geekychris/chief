@@ -35,6 +35,7 @@ import (
 	"github.com/geekychris/chief/internal/cmux"
 	"github.com/geekychris/chief/internal/config"
 	"github.com/geekychris/chief/internal/fswatch"
+	"github.com/geekychris/chief/internal/gitshim"
 	"github.com/geekychris/chief/internal/historyviewer"
 	"github.com/geekychris/chief/internal/installer"
 	"github.com/geekychris/chief/internal/ipc"
@@ -217,8 +218,28 @@ func run() error {
 		retention.Run(ctx)
 	}()
 
+	// Digest sweeper: composes + dispatches the daily/weekly rollup via
+	// the messaging router. Disabled by default; enable in config.yaml
+	// under messaging.digest.
+	digest := &orchestrator.DigestSweeper{
+		Store:    st,
+		Router:   router,
+		Enabled:  cfg.Messaging.Digest.Enabled,
+		At:       cfg.Messaging.Digest.At,
+		Cadence:  cfg.Messaging.Digest.Cadence,
+		Backends: cfg.Messaging.Digest.Backends,
+	}
+	if cfg.Messaging.Digest.WindowHours > 0 {
+		digest.Window = time.Duration(cfg.Messaging.Digest.WindowHours) * time.Hour
+	}
+	digestDone := make(chan struct{})
+	go func() {
+		defer close(digestDone)
+		digest.Run(ctx)
+	}()
+
 	srv := ipc.NewServer()
-	registerMethods(srv, st, mgr, watcher, att, cfg)
+	registerMethods(srv, st, mgr, watcher, att, cfg, digest)
 
 	slog.Info("chiefd started", "socket", sockPath, "version", Version, "pid", os.Getpid())
 
@@ -253,6 +274,7 @@ func run() error {
 	<-watchDone
 	<-sweepDone
 	<-retentionDone
+	<-digestDone
 
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
@@ -302,7 +324,7 @@ func setupLogger() (*slog.Logger, func(), error) {
 
 // registerMethods wires the per-milestone method surface. Handlers close over
 // the store/manager/watcher via method-level factories to avoid globals.
-func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config) {
+func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config, digest *orchestrator.DigestSweeper) {
 	s.Register("ping", handlePing)
 	s.Register("project.add", handleProjectAdd(st, mgr, w))
 	s.Register("project.list", handleProjectList(st))
@@ -312,6 +334,8 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("backlog.next", handleBacklogNext(st))
 	s.Register("stats.summary", handleStatsSummary(st))
 	s.Register("search", handleSearch(st))
+	s.Register("digest.preview", handleDigestPreview(digest))
+	s.Register("digest.fire", handleDigestFire(digest))
 	s.Register("task.show", handleTaskShow(st))
 	s.Register("task.add", handleTaskAdd(mgr))
 	s.Register("task.update", handleTaskUpdate(mgr))
@@ -896,6 +920,24 @@ func handleTaskSend(cc *cmux.Client, mgr *project.Manager, st *store.Store) ipc.
 			})
 		}
 
+		// Auto-branch (e98f): if enabled for this project, git switch -c
+		// chief/<id>-<slug> in the project dir before sending the prompt.
+		// Best-effort — Skipped reasons (not-a-repo, dirty tree) are
+		// logged but never fail the send.
+		pf, _ := mgr.ReadYAML(ctx, t.ProjectID)
+		if pf.AutoBranch.Enable {
+			proj, _ := st.GetProject(ctx, t.ProjectID)
+			if br, err := gitshim.EnsureBranch(ctx, proj.Path, t.ID, t.Title); err != nil {
+				slog.Warn("autobranch failed", "project", proj.Path, "task", t.ID, "err", err)
+			} else if br.Created {
+				slog.Info("autobranch created", "branch", br.Branch, "project", proj.Path)
+				_ = st.InsertEvent(ctx, t.ProjectID, "", "autobranch.created",
+					map[string]any{"task_id": t.ID, "branch": br.Branch})
+			} else if br.Skipped != "" {
+				slog.Info("autobranch skipped", "reason", br.Skipped, "branch", br.Branch)
+			}
+		}
+
 		prompt := renderTaskPrompt(t, req.ExtraInstruction)
 		if err := cc.SendAndRun(ctx, surfaceRef, prompt); err != nil {
 			return nil, err
@@ -1385,6 +1427,42 @@ func handleBacklogNext(st *store.Store) ipc.Handler {
 	}
 }
 
+// ---------- digest.preview / digest.fire ----------
+
+func handleDigestPreview(d *orchestrator.DigestSweeper) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.DigestPreviewRequest
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &req)
+		}
+		w := time.Duration(req.WindowHours) * time.Hour
+		if w <= 0 {
+			w = 24 * time.Hour
+		}
+		body, err := d.Compose(context.Background(), w)
+		if err != nil {
+			return nil, err
+		}
+		return methods.DigestPreviewResponse{Body: body}, nil
+	}
+}
+
+func handleDigestFire(d *orchestrator.DigestSweeper) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.DigestFireRequest
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &req)
+		}
+		if req.WindowHours > 0 {
+			d.Window = time.Duration(req.WindowHours) * time.Hour
+		}
+		if err := d.Fire(context.Background()); err != nil {
+			return nil, err
+		}
+		return methods.DigestFireResponse{Sent: true}, nil
+	}
+}
+
 // ---------- search ----------
 
 func handleSearch(st *store.Store) ipc.Handler {
@@ -1532,6 +1610,14 @@ func buildMessagingRouter(cfg config.Config, mgr *project.Manager) *messaging.Ro
 		case "pushover":
 			r.Register(&messaging.PushoverBackend{
 				NameStr: bc.Name, Token: bc.Token, User: bc.User,
+			})
+		case "telegram":
+			r.Register(&messaging.TelegramBackend{
+				NameStr: bc.Name, Token: bc.Token, ChatID: bc.ChatID,
+			})
+		case "slack":
+			r.Register(&messaging.SlackBackend{
+				NameStr: bc.Name, Webhook: bc.Webhook,
 			})
 		default:
 			slog.Warn("messaging: skipping backend with unknown type",
