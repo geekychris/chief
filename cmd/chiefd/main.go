@@ -302,11 +302,15 @@ func handleHistoryViewerInstall() ipc.Handler {
 	}
 }
 
-// handleHistoryViewerOpen prefers the native Wails-wrapper .app (which spawns
-// its own child web server and displays a native macOS window). Falls back to
-// spawning the raw CLI on a fixed loopback port + opening the default browser
-// when the .app isn't installed. Chief's UI opens the returned URL only in
-// the web-fallback mode.
+// handleHistoryViewerOpen prefers, in order:
+//
+//  1. Redirect a running instance in place via POST /api/filter/directory,
+//     so an already-open native window updates its filter without spawning
+//     a duplicate (requires history_viewer commit with the filter API + hv-app
+//     port file).
+//  2. Launch the native .app with --filter-dir <path>.
+//  3. Fall back to spawning the raw CLI on a fixed loopback port and
+//     opening the default browser at ?dir=<path>.
 func handleHistoryViewerOpen(mgr *project.Manager) ipc.Handler {
 	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
 		var req methods.HistoryViewerOpenRequest
@@ -319,6 +323,23 @@ func handleHistoryViewerOpen(mgr *project.Manager) ipc.Handler {
 		p, err := mgr.Store.GetProject(context.Background(), req.IDOrPath)
 		if err != nil {
 			return nil, err
+		}
+
+		// Path 0: an instance is already running — redirect its filter in
+		// place and bring the window forward.
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		if addr := historyviewer.RunningInstance(ctx); addr != "" {
+			if err := historyviewer.NavigateFilter(ctx, addr, p.Path); err == nil {
+				// Bring app forward (best-effort; the .app is running so
+				// LaunchServices reactivates it without spawning a duplicate).
+				_ = exec.Command("open", "-a", "History Viewer").Start()
+				return methods.HistoryViewerOpenResponse{
+					FilterDir: p.Path, Spawned: false, Mode: "app-navigate",
+				}, nil
+			}
+			// Navigate failed (endpoint missing on older binary, etc.);
+			// fall through to spawn a fresh instance.
 		}
 
 		// Path 1: native app is installed — invoke its inner binary directly

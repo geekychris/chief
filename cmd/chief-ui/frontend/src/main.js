@@ -281,8 +281,10 @@ async function openHistoryForCurrentProject() {
     }
     const open = await OpenHistoryViewer(projectID);
     els.pmHistoryHint.classList.remove('hidden');
-    if (open.mode === 'app') {
-      els.pmHistoryHint.textContent = `Opened History Viewer.app filtered by ${open.filter_dir}`;
+    if (open.mode === 'app-navigate') {
+      els.pmHistoryHint.textContent = `Redirected running History Viewer.app to ${open.filter_dir}`;
+    } else if (open.mode === 'app') {
+      els.pmHistoryHint.textContent = `Spawned History Viewer.app filtered by ${open.filter_dir}`;
     } else {
       els.pmHistoryHint.textContent = `Opened ${open.url}  (${open.spawned ? 'spawned new instance' : 'reused running instance'})`;
     }
