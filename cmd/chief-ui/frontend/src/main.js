@@ -786,39 +786,37 @@ async function openTraceForCurrentProject() {
 
 async function openCodeGraphForCurrentProject() {
   const projectID = state.selectedProject;
-  if (!projectID) return;
+  if (!projectID) {
+    showToast('No project selected — pick one first', true);
+    return;
+  }
+  // Always show the hint area on click so the user sees the button
+  // did something even if the RPC is slow. The old flow relied on
+  // window.confirm() which is unreliable inside Wails webviews.
+  els.pmCodeGraphHint.classList.remove('hidden');
+  els.pmCodeGraphHint.textContent = 'Launching code graph…';
   try {
-    const status = await CodeGraphStatus();
-    if (!status.installed) {
-      const missing = [];
-      if (!status.has_java) missing.push('java 21');
-      if (!status.has_maven) missing.push('maven');
-      if (!status.has_npm) missing.push('node/npm');
-      let msg = 'code_graph_search is not installed. Install now (~2-5min: clones + mvn package)?';
-      if (missing.length) {
-        msg += `\n\nMissing prereqs: ${missing.join(', ')}. Install first via brew: brew install openjdk@21 maven node`;
-      }
-      if (!confirm(msg)) return;
-      els.pmCodeGraphHint.classList.remove('hidden');
-      els.pmCodeGraphHint.textContent = 'Installing code_graph_search (this can take a few minutes)…';
-      const r = await InstallCodeGraph();
-      if (!r.ok) {
-        els.pmCodeGraphHint.textContent = 'Install failed: ' + (r.error || 'unknown') + ' — see console for full log';
-        console.error('code_graph_search install log:\n' + r.log);
-        return;
-      }
-      els.pmCodeGraphHint.textContent = `Built ${r.jar_path} in ${Math.round(r.duration_ms / 1000)}s — launching…`;
-    } else {
-      els.pmCodeGraphHint.classList.add('hidden');
-    }
     const open = await OpenCodeGraph(projectID);
-    els.pmCodeGraphHint.classList.remove('hidden');
-    const state = open.spawned ? 'spawned' : 'reused';
-    els.pmCodeGraphHint.textContent = `${state} on ${open.url}  (config: ${open.config_path})`;
+    const label = open.spawned ? 'spawned' : 'reused';
+    els.pmCodeGraphHint.textContent =
+      `${label} on ${open.url}  (config: ${open.config_path})`;
+    showToast(`code graph → ${open.url}`);
   } catch (e) {
+    const msg = String(e && e.message || e);
+    // Common case: JAR missing. Give the exact install command so the
+    // user can run it in a terminal (better than a 5-min blocking UI
+    // modal for a `mvn package` build).
+    if (/JAR missing|not installed/i.test(msg)) {
+      els.pmCodeGraphHint.innerHTML =
+        `code_graph_search isn't built yet. ` +
+        `In a terminal run: <code>chief codegraph install</code> ` +
+        `(clones + mvn package, ~2-5min). Then re-click.`;
+      showToast('code_graph_search not built — run `chief codegraph install`', true);
+    } else {
+      els.pmCodeGraphHint.textContent = 'Open failed: ' + msg;
+      showToast('Open failed: ' + msg, true);
+    }
     console.error('code graph open failed', e);
-    els.pmCodeGraphHint.classList.remove('hidden');
-    els.pmCodeGraphHint.textContent = 'Open failed: ' + (e.message || e);
   }
 }
 
