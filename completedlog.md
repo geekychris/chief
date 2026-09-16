@@ -1,5 +1,6 @@
 # Completed
 
+- [x] {id:ad14} Task dependencies (blocks / blocked-by) [category:Multi-project coordination] (done 2026-09-16 04:02)
 - [x] {id:535c} Per-project + global Do-Not-Disturb schedule [category:Attention & notifications] (done 2026-09-16 03:56)
 - [x] {id:19f8} Log every daemon operation to the SQLite `events` table with structured JSON payload [priority:5] [category:Operations logging & analytics] (done 2026-09-16 03:56)
 - [x] {id:2546} Retention policy for the events table [category:Operations logging & analytics] (done 2026-09-16 03:56)

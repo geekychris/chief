@@ -24,8 +24,6 @@
   Which urgency → which backend(s). Example: `urgent → telegram+macos; attention → telegram; info → macos-only`. Per-project overrides in `.chief/project.yaml`.
 
 ## Multi-project coordination
-- [ ] {id:ad14} Task dependencies (blocks / blocked-by) [priority:med]
-  `[blocks:id:a3f1]` and `[blocked-by:id:b7c2]` tags in `backlog.md`. Parser writes them to a `task_edges` table; scheduler skips blocked tasks when choosing what to hand out; UI shows a dependency graph per project.
 - [ ] {id:e38e} Task splitting proposal flow
   New MCP tool `chief_propose_split(task_id, subtasks[])`. Claude can propose that a task is too large; chief presents the proposal for human ack; on approve, replaces the original checkbox with the children (preserving history in `dropped.md`).
 - [ ] {id:ce12} Per-project token / cost tracking [priority:med]

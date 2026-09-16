@@ -616,6 +616,28 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 		storeTasks = append(storeTasks, st)
 		seen[t.ID] = true
 	}
+	// Derive blocked status from [blocked-by:xxxx] tags. A pending task
+	// whose ANY blocker is not yet 'done' gets flipped to 'blocked'.
+	// Done + dropped stay as-is (blocked→done is a legit terminal state
+	// and dropped is out of scope). The lookup is over the union of
+	// backlog + completedlog + dropped (via `seen`), so cross-file
+	// dependencies work (e.g., a pending task blocked by a completed one).
+	statusByID := map[string]store.TaskStatus{}
+	for _, t := range storeTasks {
+		statusByID[t.ID] = t.Status
+	}
+	for i := range storeTasks {
+		if storeTasks[i].Status != store.TaskPending {
+			continue
+		}
+		for _, dep := range storeTasks[i].BlockedBy {
+			if statusByID[dep] != store.TaskDone {
+				storeTasks[i].Status = store.TaskBlocked
+				break
+			}
+		}
+	}
+
 	if err := m.Store.UpsertTasks(ctx, proj.ID, storeTasks); err != nil {
 		return nil, err
 	}
@@ -723,6 +745,8 @@ func toStoreTask(t backlog.Task, projectID, sourceFile string) store.Task {
 		Priority:          t.Priority,
 		Category:          t.Category,
 		RequiredResources: t.RequiredResources,
+		Blocks:            t.Blocks,
+		BlockedBy:         t.BlockedBy,
 	}
 	if t.Due != "" {
 		d := t.Due

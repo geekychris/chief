@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority            INTEGER NOT NULL DEFAULT 0,
     category            TEXT NOT NULL DEFAULT '',
     required_resources  TEXT NOT NULL DEFAULT '[]', -- JSON array
+    -- source_line, blocks, blocked_by added by later migrations (v2, v4).
     due                 TEXT,
     claimed_at          TEXT,
     claimed_by_session  TEXT,

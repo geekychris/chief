@@ -51,8 +51,15 @@ type Task struct {
 	Due               string
 	CompletedAt       string
 	DeferredReason    string
-	LineNum           int    // 1-based
-	RawLine           string // original checkbox line
+	// Blocks: task ids this task blocks (from [blocks:xxxx] tag).
+	// BlockedBy: task ids this task depends on (from [blocked-by:yyyy]).
+	// Multiple ids can be comma-separated: [blocked-by:aaaa,bbbb].
+	// Wire-level relationship; project.Rescan resolves the derived
+	// "blocked" status by checking whether each BlockedBy target is done.
+	Blocks    []string
+	BlockedBy []string
+	LineNum   int    // 1-based
+	RawLine   string // original checkbox line
 }
 
 // LineEdit describes a single line replacement in the original file.
@@ -72,7 +79,9 @@ var checkboxRE = regexp.MustCompile(`^(\s*)-\s+\[([ xX~!])\]\s+(.*)$`)
 var idRE = regexp.MustCompile(`^\{id:([a-fA-F0-9]+)\}\s*`)
 
 // tagRE matches "[key:value]" bracket tags anywhere in the payload.
-var tagRE = regexp.MustCompile(`\[([a-z_]+):([^\]]+)\]`)
+// Hyphens allowed in the key so `blocked-by` works alongside `priority`,
+// `resources`, `due`, etc.
+var tagRE = regexp.MustCompile(`\[([a-z_-]+):([^\]]+)\]`)
 
 // doneParenRE matches "(done ...)" suffix on completed tasks.
 var doneParenRE = regexp.MustCompile(`\(done\s+([^)]+)\)`)
@@ -268,7 +277,30 @@ func applyTag(t *Task, key, val string) {
 		// parsePayload runs after category was assigned from the header, so
 		// the tag takes precedence — which is what we want for completedlog.
 		t.Category = val
+	case "blocks":
+		for _, id := range splitIDs(val) {
+			t.Blocks = append(t.Blocks, id)
+		}
+	case "blocked-by":
+		for _, id := range splitIDs(val) {
+			t.BlockedBy = append(t.BlockedBy, id)
+		}
 	}
+}
+
+// splitIDs parses "a3f1,b7c2" or "a3f1" or "id:a3f1" into [a3f1, b7c2].
+// The "id:" prefix is tolerated so users can write [blocked-by:id:xxxx]
+// (matching the {id:xxxx} chip they see in the file).
+func splitIDs(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "id:")
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // priorityFromValue accepts "0-9" or aliases "low"/"med"/"medium"/"high".

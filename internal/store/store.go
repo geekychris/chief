@@ -27,7 +27,7 @@ var schemaSQL string
 
 // currentSchemaVersion is the PRAGMA user_version we expect after migrations.
 // Bump this and add a branch in migrate() when the schema changes.
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // Store wraps *sql.DB and provides typed DAO methods.
 type Store struct {
@@ -125,6 +125,19 @@ CREATE TABLE IF NOT EXISTS flags (
 		}
 		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS flags_project_open ON flags(project_id, ack_at)`); err != nil {
 			return fmt.Errorf("apply v3 (flags_project_open): %w", err)
+		}
+	}
+
+	// v3 → v4: task dependencies (blocks/blocked-by). JSON arrays in
+	// two text columns rather than a task_edges table — SQLite handles
+	// JSON queries fine at chief's task counts, and the schema stays
+	// simpler.
+	if v < 4 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN blocks TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("apply v4 (blocks): %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("apply v4 (blocked_by): %w", err)
 		}
 	}
 
@@ -268,6 +281,11 @@ type Task struct {
 	Priority          int        `json:"priority"`
 	Category          string     `json:"category,omitempty"`
 	RequiredResources []string   `json:"required_resources,omitempty"`
+	// Blocks: ids of tasks that can't proceed until this one is done.
+	// BlockedBy: ids this task depends on. Populated from the
+	// [blocks:...] and [blocked-by:...] tags in backlog.md.
+	Blocks    []string `json:"blocks,omitempty"`
+	BlockedBy []string `json:"blocked_by,omitempty"`
 	Due               *string    `json:"due,omitempty"`
 	ClaimedAt         *time.Time `json:"claimed_at,omitempty"`
 	ClaimedBySession  *string    `json:"claimed_by_session,omitempty"`
@@ -316,6 +334,8 @@ func (s *Store) UpsertTasks(ctx context.Context, projectID string, desired []Tas
 		if err != nil {
 			return err
 		}
+		blocksJSON, _ := json.Marshal(t.Blocks)
+		blockedByJSON, _ := json.Marshal(t.BlockedBy)
 		var completedAt any
 		if t.CompletedAt != nil {
 			completedAt = t.CompletedAt.Format(time.RFC3339)
@@ -325,10 +345,11 @@ func (s *Store) UpsertTasks(ctx context.Context, projectID string, desired []Tas
 				UPDATE tasks
 				   SET title = ?, body = ?, source_file = ?, source_line_hash = ?,
 				       source_line = ?, status = ?, priority = ?, category = ?,
-				       required_resources = ?, due = ?, completed_at = ?
+				       required_resources = ?, blocks = ?, blocked_by = ?, due = ?, completed_at = ?
 				 WHERE id = ? AND project_id = ?`,
 				t.Title, t.Body, t.SourceFile, t.SourceLineHash, t.SourceLine,
 				string(t.Status), t.Priority, t.Category, string(resJSON),
+				string(blocksJSON), string(blockedByJSON),
 				t.Due, completedAt, t.ID, projectID,
 			); err != nil {
 				return fmt.Errorf("update task %s: %w", t.ID, err)
@@ -336,11 +357,13 @@ func (s *Store) UpsertTasks(ctx context.Context, projectID string, desired []Tas
 		} else {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO tasks(id, project_id, title, body, source_file, source_line_hash,
-				                  source_line, status, priority, category, required_resources, due,
+				                  source_line, status, priority, category, required_resources,
+				                  blocks, blocked_by, due,
 				                  created_at, completed_at)
-				VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				t.ID, projectID, t.Title, t.Body, t.SourceFile, t.SourceLineHash,
 				t.SourceLine, string(t.Status), t.Priority, t.Category, string(resJSON),
+				string(blocksJSON), string(blockedByJSON),
 				t.Due, t.CreatedAt.Format(time.RFC3339), completedAt,
 			); err != nil {
 				return fmt.Errorf("insert task %s: %w", t.ID, err)
@@ -377,7 +400,8 @@ type TaskFilter struct {
 func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 	q := `
 		SELECT t.id, t.project_id, t.title, t.body, t.source_file, t.source_line_hash,
-		       t.source_line, t.status, t.priority, t.category, t.required_resources, t.due,
+		       t.source_line, t.status, t.priority, t.category, t.required_resources,
+		       t.blocks, t.blocked_by, t.due,
 		       t.claimed_at, t.claimed_by_session, t.revive_count,
 		       t.created_at, t.completed_at
 		  FROM tasks t
@@ -434,7 +458,8 @@ func (s *Store) SearchTasks(ctx context.Context, query string, limit int) ([]Tas
 	like := "%" + strings.ToLower(q) + "%"
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, title, body, source_file, source_line_hash,
-		       source_line, status, priority, category, required_resources, due,
+		       source_line, status, priority, category, required_resources,
+		       blocks, blocked_by, due,
 		       claimed_at, claimed_by_session, revive_count,
 		       created_at, completed_at
 		  FROM tasks
@@ -474,7 +499,8 @@ func (s *Store) SearchTasks(ctx context.Context, query string, limit int) ([]Tas
 func (s *Store) NextPending(ctx context.Context, limit int) ([]Task, error) {
 	q := `
 		SELECT id, project_id, title, body, source_file, source_line_hash,
-		       source_line, status, priority, category, required_resources, due,
+		       source_line, status, priority, category, required_resources,
+		       blocks, blocked_by, due,
 		       claimed_at, claimed_by_session, revive_count,
 		       created_at, completed_at
 		  FROM tasks
@@ -503,7 +529,8 @@ func (s *Store) NextPending(ctx context.Context, limit int) ([]Task, error) {
 func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, project_id, title, body, source_file, source_line_hash,
-		       source_line, status, priority, category, required_resources, due,
+		       source_line, status, priority, category, required_resources,
+		       blocks, blocked_by, due,
 		       claimed_at, claimed_by_session, revive_count,
 		       created_at, completed_at
 		  FROM tasks WHERE id = ?`, id)
@@ -529,13 +556,14 @@ func (s *Store) TaskIDExists(ctx context.Context, id string) (bool, error) {
 
 func scanTask(scan func(...any) error) (Task, error) {
 	var t Task
-	var resJSON string
+	var resJSON, blocksJSON, blockedByJSON string
 	var due, claimedAt, claimedBy, completedAt sql.NullString
 	var createdAt string
 	var status string
 	if err := scan(
 		&t.ID, &t.ProjectID, &t.Title, &t.Body, &t.SourceFile, &t.SourceLineHash,
-		&t.SourceLine, &status, &t.Priority, &t.Category, &resJSON, &due,
+		&t.SourceLine, &status, &t.Priority, &t.Category, &resJSON,
+		&blocksJSON, &blockedByJSON, &due,
 		&claimedAt, &claimedBy, &t.ReviveCount,
 		&createdAt, &completedAt,
 	); err != nil {
@@ -544,6 +572,12 @@ func scanTask(scan func(...any) error) (Task, error) {
 	t.Status = TaskStatus(status)
 	if resJSON != "" {
 		_ = json.Unmarshal([]byte(resJSON), &t.RequiredResources)
+	}
+	if blocksJSON != "" {
+		_ = json.Unmarshal([]byte(blocksJSON), &t.Blocks)
+	}
+	if blockedByJSON != "" {
+		_ = json.Unmarshal([]byte(blockedByJSON), &t.BlockedBy)
 	}
 	if due.Valid {
 		v := due.String
