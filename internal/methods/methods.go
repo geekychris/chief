@@ -335,6 +335,42 @@ type HistoryViewerOpenResponse struct {
 	Mode      string `json:"mode"`                // "app" (native Wails window) | "web" (browser)
 }
 
+// ---------- cost.report ----------
+
+// CostReportRequest asks for token+dollar usage summaries.
+// Empty ProjectID = all registered projects rolled up.
+// Days=0 means "everything ever".
+type CostReportRequest struct {
+	ProjectID string `json:"project_id,omitempty"`
+	Days      int    `json:"days,omitempty"`
+}
+
+// CostReportResponse mirrors costtrack.ProjectReport on the wire,
+// plus per-project rows when the caller queries globally.
+type CostReportResponse struct {
+	Days     int              `json:"days"`
+	Total    CostUsage        `json:"total"`
+	PerModel map[string]CostUsage `json:"per_model"`
+	PerDay   map[string]CostUsage `json:"per_day"`
+	Projects []CostPerProject `json:"projects,omitempty"`
+}
+
+type CostUsage struct {
+	Model         string  `json:"model,omitempty"`
+	InputTokens   int64   `json:"input_tokens"`
+	OutputTokens  int64   `json:"output_tokens"`
+	CacheCreation int64   `json:"cache_creation_tokens"`
+	CacheRead     int64   `json:"cache_read_tokens"`
+	CostUSD       float64 `json:"cost_usd"`
+	Messages      int     `json:"messages"`
+}
+
+type CostPerProject struct {
+	ProjectID   string    `json:"project_id"`
+	ProjectName string    `json:"project_name"`
+	Total       CostUsage `json:"total"`
+}
+
 // ---------- codegraph.status / install / open ----------
 
 type CodeGraphStatusRequest struct{}

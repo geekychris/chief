@@ -34,6 +34,7 @@ import (
 	"github.com/geekychris/chief/internal/claudetrace"
 	"github.com/geekychris/chief/internal/cmux"
 	"github.com/geekychris/chief/internal/codegraphsearch"
+	"github.com/geekychris/chief/internal/costtrack"
 	"github.com/geekychris/chief/internal/config"
 	"github.com/geekychris/chief/internal/fswatch"
 	"github.com/geekychris/chief/internal/gitshim"
@@ -376,6 +377,7 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("backlog.next", handleBacklogNext(st))
 	s.Register("stats.summary", handleStatsSummary(st))
 	s.Register("stats.detailed", handleStatsDetailed(st))
+	s.Register("cost.report", handleCostReport(st))
 	s.Register("search", handleSearch(st))
 	s.Register("outliers", handleOutliers(st))
 	s.Register("lint.run", handleLintRun(lint, st))
@@ -1554,6 +1556,86 @@ func handleBacklogNext(st *store.Store) ipc.Handler {
 			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
 		}
 		return methods.BacklogNextResponse{Tasks: rows}, nil
+	}
+}
+
+// ---------- cost.report ----------
+
+func handleCostReport(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.CostReportRequest
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &req)
+		}
+		ctx := context.Background()
+		var since time.Time
+		if req.Days > 0 {
+			since = time.Now().UTC().AddDate(0, 0, -req.Days)
+		}
+		// Per-call accumulators — the ipc dispatcher can invoke handlers
+		// concurrently across connections, so we must not share state
+		// across invocations.
+		var total costtrack.Usage
+		perModel := map[string]costtrack.Usage{}
+		perDay := map[string]costtrack.Usage{}
+		toWire := func(u costtrack.Usage) methods.CostUsage {
+			return methods.CostUsage{
+				Model: u.Model, InputTokens: u.InputTokens, OutputTokens: u.OutputTokens,
+				CacheCreation: u.CacheCreation, CacheRead: u.CacheRead,
+				CostUSD: u.CostUSD, Messages: u.Messages,
+			}
+		}
+		wireMap := func(in map[string]costtrack.Usage) map[string]methods.CostUsage {
+			out := make(map[string]methods.CostUsage, len(in))
+			for k, v := range in {
+				out[k] = toWire(v)
+			}
+			return out
+		}
+		accumulate := func(p store.Project) methods.CostUsage {
+			sessions, _ := costtrack.SessionsForPath(p.Path)
+			rep, _ := costtrack.Compute(sessions, costtrack.DefaultPricing, since)
+			for model, u := range rep.PerModel {
+				agg := perModel[model]
+				agg.Model = model
+				agg.Add(u)
+				perModel[model] = agg
+			}
+			for day, u := range rep.PerDay {
+				agg := perDay[day]
+				agg.Add(u)
+				perDay[day] = agg
+			}
+			total.Add(rep.Total)
+			return toWire(rep.Total)
+		}
+
+		resp := methods.CostReportResponse{Days: req.Days}
+		if req.ProjectID != "" {
+			p, err := st.GetProject(ctx, req.ProjectID)
+			if err != nil {
+				return nil, err
+			}
+			row := accumulate(p)
+			resp.Projects = append(resp.Projects, methods.CostPerProject{
+				ProjectID: p.ID, ProjectName: p.Name, Total: row,
+			})
+		} else {
+			projs, err := st.ListProjects(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, p := range projs {
+				row := accumulate(p)
+				resp.Projects = append(resp.Projects, methods.CostPerProject{
+					ProjectID: p.ID, ProjectName: p.Name, Total: row,
+				})
+			}
+		}
+		resp.Total = toWire(total)
+		resp.PerModel = wireMap(perModel)
+		resp.PerDay = wireMap(perDay)
+		return resp, nil
 	}
 }
 

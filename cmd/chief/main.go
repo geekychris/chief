@@ -46,6 +46,7 @@ func main() {
 		outliersCmd(),
 		lintCmd(),
 		codegraphCmd(),
+		costCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -929,6 +930,97 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// costCmd shows token + USD usage rolled up from Claude session
+// jsonl files. Zero-config: reads ~/.claude/projects/<slug>/*.jsonl
+// via costtrack.SessionsForPath, applies costtrack.DefaultPricing.
+func costCmd() *cobra.Command {
+	var project string
+	var days int
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "cost",
+		Short: "Token + USD usage rollup from Claude session logs.",
+		Long: `Reads ~/.claude/projects/<slug>/*.jsonl for each registered
+project, extracts the message.usage blocks, applies per-model pricing
+(baked-in defaults for Claude 4.x Opus/Sonnet/Haiku), and prints:
+
+  Per-project rollup line
+  Per-model breakdown
+  Grand total
+
+Add --days N to limit the window. --project PATH scopes to one.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.CostReportResponse
+			if err := c.Call("cost.report", methods.CostReportRequest{
+				ProjectID: project, Days: days,
+			}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			winLabel := "all time"
+			if resp.Days > 0 {
+				winLabel = fmt.Sprintf("last %d day(s)", resp.Days)
+			}
+			fmt.Printf("Chief cost report · window: %s\n", winLabel)
+			fmt.Printf("Total: $%.4f across %d assistant message(s)\n",
+				resp.Total.CostUSD, resp.Total.Messages)
+			fmt.Printf("  Tokens: in=%s  out=%s  cache-write=%s  cache-read=%s\n\n",
+				commas(resp.Total.InputTokens), commas(resp.Total.OutputTokens),
+				commas(resp.Total.CacheCreation), commas(resp.Total.CacheRead))
+			if len(resp.Projects) > 0 {
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "PROJECT\tMESSAGES\tINPUT\tOUTPUT\tCACHE-RD\t$")
+				for _, p := range resp.Projects {
+					fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t$%.4f\n",
+						p.ProjectName, p.Total.Messages,
+						commas(p.Total.InputTokens), commas(p.Total.OutputTokens),
+						commas(p.Total.CacheRead), p.Total.CostUSD)
+				}
+				tw.Flush()
+			}
+			if len(resp.PerModel) > 0 {
+				fmt.Println("\nBy model:")
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				for model, u := range resp.PerModel {
+					fmt.Fprintf(tw, "  %s\t%d msgs\t$%.4f\n", model, u.Messages, u.CostUSD)
+				}
+				tw.Flush()
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "project id/name/path (empty = all)")
+	cmd.Flags().IntVar(&days, "days", 0, "rolling window in days (0 = all time)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON")
+	return cmd
+}
+
+// commas formats an int64 with thousand separators.
+func commas(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	pre := len(s) % 3
+	if pre == 0 {
+		pre = 3
+	}
+	b.WriteString(s[:pre])
+	for i := pre; i < len(s); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
 }
 
 // codegraphCmd fronts geekychris/code_graph_search: install the fat

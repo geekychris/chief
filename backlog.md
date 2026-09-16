@@ -7,8 +7,6 @@
 ## Messaging integrations
 
 ## Multi-project coordination
-- [ ] {id:ce12} Per-project token / cost tracking [priority:med]
-  Ingest usage from Claude's stream-json (headless mode) or shell out to `ccusage`. Show $/tokens per project and per task. Alert on budget overage. Feeds into DND ("stop pokes once daily budget hit").
 
 ## Agentic ergonomics
 - [ ] {id:d00a} Sync between machines
