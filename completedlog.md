@@ -1,5 +1,8 @@
 # Completed
 
+- [x] {id:34e5} when adding to completed include full details [category:Backlog] (done 2026-09-16 14:35:04)
+  - added: 2026-09-16 14:28:07 · started: 2026-09-16 14:28:44 · duration: 6m
+  When you add to the completed list you only keep the title.  Keep the full details both title and body text.  Also include when the task was initially added to the backlog, when it was started and when it was completed.  You can also keep other stats if you know anything like size of changes etc.
 - [x] {id:1b72} Kill idle Claude sessions — for cmux surfaces with a Claude session_id and no output/heartbeat in >N hours (per project.yaml), prompt to close (or auto-close per config). Saves API budget when a session is left running after work stops. [category:Proactive & scheduled (proposed via 40fd)] (done 2026-09-16 17:45:28)
 - [x] {id:8e23} Project bookmarks — hotkey (⌘1..⌘9) in Chief.app to jump between pinned projects. Also surface via `chief goto 1..9` CLI. Matches the "many projects, one focused at a time" workflow. [category:Ergonomics + intelligence (proposed via 40fd)] (done 2026-09-16 17:45:28)
 - [x] {id:de35} smoke-test undo [category:Backlog] (done 2026-09-16 17:39:20)

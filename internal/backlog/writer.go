@@ -281,12 +281,22 @@ func collapseBlankRuns(lines []string) []string {
 }
 
 // CompletionInput is what PrependCompletion needs to render an entry.
+//
+// Body / CreatedAt / StartedAt / Duration are optional — when unset, the
+// entry reduces to the one-line legacy form so old data round-trips
+// unchanged. When set, the entry gains an indented meta line (added /
+// started / duration) followed by the original body sub-bullets, so a
+// re-parse re-populates Task.Body verbatim.
 type CompletionInput struct {
-	ID       string
-	Title    string
-	Priority int
-	Category string
-	DoneAt   string // free-form; caller decides format ("2026-09-15 15:02" or RFC3339)
+	ID        string
+	Title     string
+	Priority  int
+	Category  string
+	DoneAt    string // free-form; caller decides format ("2026-09-15 15:02" or RFC3339)
+	Body      string // original task body (indented sub-bullets)
+	CreatedAt string // "2026-09-14 10:15:30" — when chief first saw the task
+	StartedAt string // "2026-09-15 09:00:00" — from claimed_at or first task.sent
+	Duration  string // e.g. "30h" or "1d 4h"; free-form label
 }
 
 // PrependCompletion inserts a one-line entry at the top of completedlog.md,
@@ -349,12 +359,58 @@ func renderCompletionLine(in CompletionInput) string {
 	if in.Category != "" {
 		tags = append(tags, fmt.Sprintf("[category:%s]", in.Category))
 	}
-	line := fmt.Sprintf("- [x] {id:%s} %s", in.ID, strings.TrimSpace(in.Title))
+	head := fmt.Sprintf("- [x] {id:%s} %s", in.ID, strings.TrimSpace(in.Title))
 	if len(tags) > 0 {
-		line += " " + strings.Join(tags, " ")
+		head += " " + strings.Join(tags, " ")
 	}
-	line += " (done " + in.DoneAt + ")"
-	return line
+	head += " (done " + in.DoneAt + ")"
+
+	// Extended form: append an indented meta line + body sub-bullets when
+	// present. Order of pieces: header line → meta line → body. Everything
+	// after the header is indented so the parser continues to attribute
+	// it to this task.
+	var extras []string
+	if meta := renderMetaLine(in); meta != "" {
+		extras = append(extras, "  "+meta)
+	}
+	if strings.TrimSpace(in.Body) != "" {
+		// Preserve body exactly. Body lines should already start with the
+		// 2-space indent the parser expects (see backlog.NewTaskInput /
+		// AppendToFile), but we defensively re-indent lines that don't.
+		for _, ln := range strings.Split(strings.TrimRight(in.Body, "\n"), "\n") {
+			if ln == "" {
+				extras = append(extras, "")
+			} else if strings.HasPrefix(ln, "  ") || strings.HasPrefix(ln, "\t") {
+				extras = append(extras, ln)
+			} else {
+				extras = append(extras, "  "+ln)
+			}
+		}
+	}
+	if len(extras) == 0 {
+		return head
+	}
+	return head + "\n" + strings.Join(extras, "\n")
+}
+
+// renderMetaLine renders the "- added: X · started: Y · duration: Z"
+// indented sub-bullet. Returns "" when nothing to include, so callers
+// can skip the whole line for legacy data.
+func renderMetaLine(in CompletionInput) string {
+	var parts []string
+	if in.CreatedAt != "" {
+		parts = append(parts, "added: "+in.CreatedAt)
+	}
+	if in.StartedAt != "" {
+		parts = append(parts, "started: "+in.StartedAt)
+	}
+	if in.Duration != "" {
+		parts = append(parts, "duration: "+in.Duration)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "- " + strings.Join(parts, " · ")
 }
 
 // DroppedInput mirrors CompletionInput. Kept as a separate type so future

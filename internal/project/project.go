@@ -384,6 +384,55 @@ func (m *Manager) snapshotBefore(projectID, reason string) {
 	m.PreMutationSnapshot(projectID, reason)
 }
 
+// firstTaskSent returns the earliest task.sent event timestamp for a
+// specific task, or zero-time if none exist. Used by the completion
+// sweep to attribute a started_at when store.Task.ClaimedAt is nil
+// (chief may know a task was handed to Claude even if no claim
+// happened via the MCP path).
+func (m *Manager) firstTaskSent(ctx context.Context, projectID, taskID string) time.Time {
+	if m.Store == nil {
+		return time.Time{}
+	}
+	row := m.Store.DB().QueryRowContext(ctx, `
+		SELECT MIN(ts) FROM events
+		 WHERE project_id = ? AND kind = 'task.sent'
+		   AND payload LIKE ?`, projectID, `%"task_id":"`+taskID+`"%`)
+	var tsStr string
+	if err := row.Scan(&tsStr); err != nil || tsStr == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339Nano, tsStr)
+	return t
+}
+
+// humanDuration formats a Duration compactly for completion-line meta:
+// "45m", "3h", "1d 4h", "5d". Zero+negative return "".
+func humanDuration(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		h := int(d.Hours())
+		mins := int(d.Minutes()) - h*60
+		if mins == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh %dm", h, mins)
+	}
+	days := int(d.Hours()) / 24
+	remH := int(d.Hours()) - days*24
+	if remH == 0 {
+		return fmt.Sprintf("%dd", days)
+	}
+	return fmt.Sprintf("%dd %dh", days, remH)
+}
+
 // UpdateTaskOpts is what UpdateTask consumes; nil Body pointer means "don't
 // touch body", *"" means "clear body", *"foo" means "replace body with foo".
 type UpdateTaskOpts struct {
@@ -691,14 +740,50 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 			t := sweptTasks[i]
 			doneAt := t.CompletedAt
 			if doneAt == "" {
-				// Seconds precision (1c88) — makes it possible to reconstruct
-				// order-of-completion when many items are marked done in
-				// the same minute (common with batch send-and-mark flows).
-				doneAt = time.Now().UTC().Format("2006-01-02 15:04:05")
+				// Local time (34e5) so the doneAt in the file agrees with
+				// the added/started meta line below — both use local. The
+				// pre-34e5 code used UTC here which produced wrong
+				// durations when subtracted from local started_at.
+				doneAt = time.Now().Local().Format("2006-01-02 15:04:05")
+			}
+			// 34e5: attach added/started/duration + full body to the
+			// completedlog entry. added_at comes from the store row's
+			// created_at; started_at is claimed_at OR the earliest
+			// task.sent event; duration is doneAt-startedAt when both
+			// known. All best-effort — a task the store never saw (very
+			// short-lived tasks that get created + marked [x] in the
+			// same rescan) skips the meta line and reduces to the
+			// legacy one-line form.
+			var createdAt, startedAt, duration string
+			if storeTask, err := m.Store.GetTask(ctx, t.ID); err == nil {
+				if !storeTask.CreatedAt.IsZero() {
+					createdAt = storeTask.CreatedAt.Local().Format("2006-01-02 15:04:05")
+				}
+				if storeTask.ClaimedAt != nil && !storeTask.ClaimedAt.IsZero() {
+					startedAt = storeTask.ClaimedAt.Local().Format("2006-01-02 15:04:05")
+				}
+			}
+			if startedAt == "" {
+				if firstSent := m.firstTaskSent(ctx, proj.ID, t.ID); !firstSent.IsZero() {
+					startedAt = firstSent.Local().Format("2006-01-02 15:04:05")
+				}
+			}
+			if startedAt != "" {
+				if start, err := time.ParseInLocation("2006-01-02 15:04:05", startedAt, time.Local); err == nil {
+					if done, err := time.ParseInLocation("2006-01-02 15:04:05", doneAt, time.Local); err == nil {
+						if d := done.Sub(start); d > 0 {
+							duration = humanDuration(d)
+						}
+					}
+				}
 			}
 			newCompleted = backlog.PrependCompletion(newCompleted, backlog.CompletionInput{
 				ID: t.ID, Title: t.Title, Priority: t.Priority,
 				Category: t.Category, DoneAt: doneAt,
+				Body:      t.Body,
+				CreatedAt: createdAt,
+				StartedAt: startedAt,
+				Duration:  duration,
 			})
 		}
 		if newCompleted != completedContent {
