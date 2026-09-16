@@ -57,6 +57,58 @@ func JarPath() string {
 // IsInstalled reports whether the JAR exists.
 func IsInstalled() bool { return JarPath() != "" }
 
+// AppBundlePath returns the absolute path to the installed
+// Code Graph Search.app bundle, or "" if not found. Checks
+// ~/Applications first (default install target), then /Applications.
+// See upstream commit 6e27e4c for the desktop wrapper — the .app
+// bundles a trimmed JRE via jpackage so end users don't need Java
+// on PATH.
+func AppBundlePath() string {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		filepath.Join(home, "Applications", "Code Graph Search.app"),
+		"/Applications/Code Graph Search.app",
+	} {
+		if st, err := os.Stat(p); err == nil && st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// AppBundleInnerBinary returns the path to the Mach-O executable
+// inside the .app bundle, or "" if not found. Chief invokes this
+// directly (rather than `open -a`) so --config / --port flags forward
+// reliably — `open --args` doesn't consistently forward flags through
+// LaunchServices to jpackage-produced launchers.
+func AppBundleInnerBinary() string {
+	app := AppBundlePath()
+	if app == "" {
+		return ""
+	}
+	// jpackage-produced bundles put the launcher at
+	// Contents/MacOS/<CFBundleExecutable>. Look for the well-known name
+	// first; fall back to picking the first executable in MacOS/.
+	candidate := filepath.Join(app, "Contents", "MacOS", "Code Graph Search")
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+		return candidate
+	}
+	entries, err := os.ReadDir(filepath.Join(app, "Contents", "MacOS"))
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(app, "Contents", "MacOS", e.Name())
+		if info, err := os.Stat(p); err == nil && info.Mode().Perm()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
+}
+
 // PortForProject returns a stable loopback port derived from the
 // project path so relaunching for the same project reuses the same
 // port. Range: 30000-39999 (avoids most well-known service ports).

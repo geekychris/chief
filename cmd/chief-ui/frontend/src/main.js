@@ -797,10 +797,11 @@ async function openCodeGraphForCurrentProject() {
   els.pmCodeGraphHint.textContent = 'Launching code graph…';
   try {
     const open = await OpenCodeGraph(projectID);
-    const label = open.spawned ? 'spawned' : 'reused';
+    const state = open.spawned ? 'spawned' : 'reused';
+    const via = open.mode === 'app' ? 'Code Graph Search.app' : 'raw JAR + browser';
     els.pmCodeGraphHint.textContent =
-      `${label} on ${open.url}  (config: ${open.config_path})`;
-    showToast(`code graph → ${open.url}`);
+      `${state} — ${via} on ${open.url}  (config: ${open.config_path})`;
+    showToast(`code graph → ${via}`);
   } catch (e) {
     const msg = String(e && e.message || e);
     // Common case: JAR missing. Give the exact install command so the

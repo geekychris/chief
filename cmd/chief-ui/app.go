@@ -566,9 +566,11 @@ func (a *App) InstallCodeGraph() (methods.CodeGraphInstallResponse, error) {
 	return resp, nil
 }
 
-// OpenCodeGraph launches (or reuses) code_graph_search for a project
-// and opens the URL in the default browser. The Wails wrapper for
-// code_graph_search itself is a separate follow-up.
+// OpenCodeGraph launches (or reuses) code_graph_search for a project.
+// When Code Graph Search.app is installed (upstream commit 6e27e4c),
+// the .app opens itself in a native JavaFX WebView window — we skip
+// opening the browser. Fallback (mode=web): open the URL in the
+// default browser.
 func (a *App) OpenCodeGraph(projectID string) (methods.CodeGraphOpenResponse, error) {
 	c, err := a.dial()
 	if err != nil {
@@ -579,7 +581,7 @@ func (a *App) OpenCodeGraph(projectID string) (methods.CodeGraphOpenResponse, er
 	if err := c.Call("codegraph.open", methods.CodeGraphOpenRequest{IDOrPath: projectID}, &resp); err != nil {
 		return methods.CodeGraphOpenResponse{}, err
 	}
-	if resp.URL != "" {
+	if resp.Mode != "app" && resp.URL != "" {
 		_ = execOpen(resp.URL)
 	}
 	return resp, nil

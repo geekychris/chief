@@ -727,38 +727,65 @@ func handleCodeGraphOpen(mgr *project.Manager) ipc.Handler {
 		if err != nil {
 			return nil, err
 		}
-		jar := codegraphsearch.JarPath()
-		if jar == "" {
-			return nil, &ipc.RPCError{
-				Code:    ipc.ErrCodeInternal,
-				Message: "code_graph_search JAR missing — run `chief codegraph install` or click the button in the UI",
-			}
-		}
 		port := codegraphsearch.PortForProject(p.Path)
 		cfgPath, err := codegraphsearch.EnsureConfig(p.Path, port)
 		if err != nil {
 			return nil, err
 		}
 		spawned := false
+		mode := "app" // will be re-labeled if we fall back to JAR
+
 		if !codegraphsearch.Alive(port) {
-			if _, err := codegraphsearch.Spawn(jar, cfgPath); err != nil {
-				return nil, err
+			// Preferred path: launch the .app bundle (Code Graph Search.app)
+			// if installed. It's a jpackage-produced self-contained bundle
+			// with JRE + JavaFX WebView — user sees a native window instead
+			// of a browser tab, and needs no PATH prereqs. Upstream commit
+			// 6e27e4c added the desktop/ module that produces this.
+			if appBin := codegraphsearch.AppBundleInnerBinary(); appBin != "" {
+				cmd := exec.Command(appBin, "--config", cfgPath, "--port", fmt.Sprintf("%d", port))
+				cmd.Env = os.Environ()
+				if err := cmd.Start(); err != nil {
+					return nil, fmt.Errorf("launch Code Graph Search.app: %w", err)
+				}
+				spawned = true
+			} else {
+				// Fallback: raw JAR + browser (requires JAR to be built).
+				jar := codegraphsearch.JarPath()
+				if jar == "" {
+					return nil, &ipc.RPCError{
+						Code: ipc.ErrCodeInternal,
+						Message: "code_graph_search not installed — run `chief codegraph install` or, for the native .app, build + install `desktop/` via `cd desktop && make app install` in the code_graph_search checkout at ~/Library/Caches/Chief/code_graph_search",
+					}
+				}
+				if _, err := codegraphsearch.Spawn(jar, cfgPath); err != nil {
+					return nil, err
+				}
+				spawned = true
+				mode = "web"
 			}
-			spawned = true
-			// Give the server a moment to bind the port before returning
-			// so the UI's browser open doesn't race and 404.
+			// Wait for the loopback port to bind before returning so the
+			// UI's browser-open (fallback path) or app-window navigation
+			// doesn't race and 404.
 			deadline := time.Now().Add(15 * time.Second)
 			for !codegraphsearch.Alive(port) && time.Now().Before(deadline) {
 				time.Sleep(250 * time.Millisecond)
 			}
+		} else {
+			// Alive already — figure out whether this was the .app or the
+			// JAR-mode raw launch based on what's installed. Not perfect
+			// (both could be present) but good enough for the label.
+			if codegraphsearch.AppBundleInnerBinary() == "" {
+				mode = "web"
+			}
 		}
 		_ = mgr.Store.InsertEvent(ctx, p.ID, "", "codegraph.opened", map[string]any{
-			"port": port, "spawned": spawned, "config_path": cfgPath,
+			"port": port, "spawned": spawned, "config_path": cfgPath, "mode": mode,
 		})
-		return methods.CodeGraphOpenResponse{
+		resp := methods.CodeGraphOpenResponse{
 			URL: codegraphsearch.URL(port), Port: port,
-			ConfigPath: cfgPath, Spawned: spawned,
-		}, nil
+			ConfigPath: cfgPath, Spawned: spawned, Mode: mode,
+		}
+		return resp, nil
 	}
 }
 

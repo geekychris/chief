@@ -1228,12 +1228,20 @@ func codegraphOpenCmd() *cobra.Command {
 			}
 			fmt.Printf("URL:    %s\n", resp.URL)
 			fmt.Printf("Config: %s\n", resp.ConfigPath)
-			if resp.Spawned {
-				fmt.Println("(freshly spawned)")
+			label := ""
+			if resp.Mode == "app" {
+				label = "Code Graph Search.app"
 			} else {
-				fmt.Println("(reused existing instance)")
+				label = "raw JAR + browser"
 			}
-			if openBrowser {
+			if resp.Spawned {
+				fmt.Printf("(freshly spawned — %s)\n", label)
+			} else {
+				fmt.Printf("(reused existing instance — %s)\n", label)
+			}
+			// Only open the browser in web-fallback mode; the .app has
+			// its own native JavaFX WebView window.
+			if openBrowser && resp.Mode == "web" {
 				_ = exec.Command("open", resp.URL).Start()
 			}
 			return nil

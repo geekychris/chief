@@ -441,6 +441,10 @@ type CodeGraphOpenResponse struct {
 	Port       int    `json:"port"`
 	ConfigPath string `json:"config_path"`
 	Spawned    bool   `json:"spawned"`
+	// Mode: "app" = Code Graph Search.app launched (native window,
+	// no browser open needed); "web" = raw JAR + open URL in default
+	// browser (fallback when the .app isn't installed).
+	Mode string `json:"mode"`
 }
 
 // ---------- analyzer.install ----------
