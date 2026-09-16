@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekychris/chief/internal/messaging"
 	"github.com/geekychris/chief/internal/notify"
 	"github.com/geekychris/chief/internal/store"
 )
@@ -52,6 +53,14 @@ type Manager struct {
 	// doesn't need to import config/project (avoids an import cycle).
 	DNDWindowFor func(projectID string) DNDWindow
 
+	// Router, when non-nil, fans out each flag to configured messaging
+	// backends (log file, ntfy, Pushover, Telegram, Slack, etc.). DND
+	// and snooze still apply — the router only runs when a real macOS
+	// notification would have been fired. `info` urgency is delivered
+	// only when the router's per-urgency rules include it (default
+	// routing excludes info).
+	Router *messaging.Router
+
 	// snoozeUntil tracks per-project "hold notifications" cursors set via
 	// Snooze(). Reset on chiefd restart, which is fine — snoozes are
 	// meant to be short (minutes to hours). Not persisted to avoid a
@@ -80,6 +89,9 @@ type RaiseResult struct {
 	RateLimited    bool // flag stored, notification skipped
 	SnoozedProject bool // project is currently snoozed; notification skipped
 	InDND          bool // scheduled DND window suppressed the notification
+	// BackendsFired lists names of messaging backends the router
+	// successfully dispatched to (info urgency + no rules → empty).
+	BackendsFired []string
 }
 
 // Raise records a new attention flag. It:
@@ -171,14 +183,6 @@ func (m *Manager) notify(ctx context.Context, f store.Flag, coalesced bool, opts
 		return res, nil
 	}
 
-	// Urgency=info: no macOS notification, badge only.
-	if f.Urgency == store.UrgencyInfo {
-		return res, nil
-	}
-
-	if m.Notifier == nil {
-		return res, nil
-	}
 	proj, _ := m.Store.GetProject(ctx, opts.ProjectID)
 	title := "Chief"
 	if proj.Name != "" {
@@ -188,6 +192,39 @@ func (m *Manager) notify(ctx context.Context, f store.Flag, coalesced bool, opts
 	body := f.Question
 	if body == "" {
 		body = "Attention requested"
+	}
+
+	// Messaging backends (ntfy/Pushover/Telegram/log) — the router
+	// consults per-urgency rules so info flags CAN still reach a phone
+	// if the user opts them in, even though macOS notification stays
+	// silent for info.
+	if m.Router != nil {
+		msg := messaging.Message{
+			ProjectID:   opts.ProjectID,
+			ProjectName: proj.Name,
+			Urgency:     messaging.Urgency(f.Urgency),
+			Title:       title + " — " + subtitle,
+			Body:        body,
+			Kind:        "flag." + string(f.Kind),
+			Ts:          f.CreatedAt,
+		}
+		fired := m.Router.Dispatch(ctx, msg)
+		for _, r := range fired {
+			if r.Error == nil && r.Skipped == "" {
+				res.BackendsFired = append(res.BackendsFired, r.Backend)
+			}
+		}
+	}
+
+	// Urgency=info: no macOS notification, badge only. Router (above)
+	// already ran because info flags may still be routed to phone push
+	// if the user opts them in.
+	if f.Urgency == store.UrgencyInfo {
+		return res, nil
+	}
+
+	if m.Notifier == nil {
+		return res, nil
 	}
 	sound := ""
 	if f.Urgency == store.UrgencyUrgent {

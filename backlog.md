@@ -12,16 +12,10 @@
   A task claimed 3+ times without completion is probably stuck — flag with a "needs human review" badge and suggest defer or split. Same treatment for tasks whose active duration crosses a per-project SLA (default 4h).
 
 ## Messaging integrations
-- [ ] {id:fe1c} Plugin architecture for messaging backends [priority:high]
-  Define `internal/messaging/backend.go` interface: `Send(project, urgency, text, actions[])`, `OnIncoming(fn)`. Backends registered via `config.yaml`. Each runs in its own goroutine and calls back into `chiefd` via unix socket. Ship a docs page for writing a new backend and a fake backend for tests.
 - [ ] {id:588b} Telegram backend as first implementation of the plugin arch [priority:high]
   Long-poll bot; inbound commands: `/status`, `/list <project>`, `/next <project>`, `/defer <task_id>`, `/answer <flag_id> <text>`, `/add <project> <title>`. Outbound: attention notifications with inline buttons (Approve/Skip/Snooze) that round-trip through `chief_reply_to_flag`. Bot token from config; ACL by allowed `chat_id` list.
-- [ ] {id:5802} ntfy.sh + Pushover backends [priority:med]
-  Simpler outbound-only. Map chief's urgency tiers to their native priorities. Nice for phone push without running a bot.
 - [ ] {id:1834} Slack backend
   Same pattern as Telegram; supports thread-per-project so each project's chatter stays organized.
-- [ ] {id:9496} Message routing rules
-  Which urgency → which backend(s). Example: `urgent → telegram+macos; attention → telegram; info → macos-only`. Per-project overrides in `.chief/project.yaml`.
 
 ## Multi-project coordination
 - [ ] {id:e38e} Task splitting proposal flow

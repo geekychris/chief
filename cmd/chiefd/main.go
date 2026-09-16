@@ -38,6 +38,7 @@ import (
 	"github.com/geekychris/chief/internal/historyviewer"
 	"github.com/geekychris/chief/internal/installer"
 	"github.com/geekychris/chief/internal/ipc"
+	"github.com/geekychris/chief/internal/messaging"
 	"github.com/geekychris/chief/internal/methods"
 	"github.com/geekychris/chief/internal/notify"
 	"github.com/geekychris/chief/internal/orchestrator"
@@ -85,12 +86,19 @@ func run() error {
 
 	mgr := project.New(st)
 
+	// Messaging plugin arch: build the router + backends from config
+	// once at boot. Log backend is always present as a local audit
+	// trail; other backends (ntfy, Pushover, Telegram, Slack) only
+	// register if their config entry exists.
+	router := buildMessagingRouter(cfg, mgr)
+
 	// Attention manager: writes flags to `flags` table + fires macOS
 	// notifications (osascript). Wired into project.Manager so the Rescan
 	// path can raise "next-task" suggestions when a task transitions to done.
 	att := &attention.Manager{
 		Store:    st,
 		Notifier: notify.New(),
+		Router:   router,
 	}
 	// DND resolver: per-project override wins over global. A project
 	// with dnd.disable=true always fires (opts out of global quiet hours).
@@ -1498,4 +1506,81 @@ func handleTaskShow(st *store.Store) ipc.Handler {
 		p, _ := st.GetProject(ctx, t.ProjectID)
 		return methods.TaskShowResponse{Task: t, ProjectName: p.Name}, nil
 	}
+}
+
+// buildMessagingRouter constructs the messaging.Router from config +
+// a per-project rules resolver that reads .chief/project.yaml. Always
+// registers a LogBackend under the name "local-log" so there's a
+// baseline audit trail even if the user hasn't configured anything.
+func buildMessagingRouter(cfg config.Config, mgr *project.Manager) *messaging.Router {
+	logDir, _ := ipc.LogDir()
+	r := &messaging.Router{}
+	r.Register(&messaging.LogBackend{
+		NameStr: "local-log",
+		Path:    filepath.Join(logDir, "messages.jsonl"),
+	})
+	// Configured backends. Unknown types are logged + skipped so a
+	// typo in config doesn't wedge boot.
+	for _, bc := range cfg.Messaging.Backends {
+		switch bc.Type {
+		case "log":
+			r.Register(&messaging.LogBackend{NameStr: bc.Name, Path: bc.Path})
+		case "ntfy":
+			r.Register(&messaging.NtfyBackend{
+				NameStr: bc.Name, Server: bc.Server, Topic: bc.Topic,
+			})
+		case "pushover":
+			r.Register(&messaging.PushoverBackend{
+				NameStr: bc.Name, Token: bc.Token, User: bc.User,
+			})
+		default:
+			slog.Warn("messaging: skipping backend with unknown type",
+				"name", bc.Name, "type", bc.Type)
+		}
+	}
+	// Global rules — default to LogBackend when nothing is configured
+	// so at least the local audit trail runs.
+	global := messaging.Rules{
+		Default:    cfg.Messaging.Routing.Default,
+		PerUrgency: convertPerUrgency(cfg.Messaging.Routing.PerUrgency),
+		Disable:    cfg.Messaging.Routing.Disable,
+	}
+	if len(global.Default) == 0 && len(global.PerUrgency) == 0 && !global.Disable {
+		global.Default = []string{"local-log"}
+	}
+	r.GlobalRules = global
+
+	// Per-project override — read .chief/project.yaml on each dispatch.
+	// Cheap enough for the message rate we're at; hot-reloadable
+	// without a chiefd restart.
+	r.PerProjectRules = func(projectID string) messaging.Rules {
+		pf, err := mgr.ReadYAML(context.Background(), projectID)
+		if err != nil {
+			return messaging.Rules{}
+		}
+		if pf.Messaging.Disable {
+			return messaging.Rules{Disable: true}
+		}
+		if len(pf.Messaging.Default) == 0 && len(pf.Messaging.PerUrgency) == 0 {
+			return messaging.Rules{}
+		}
+		return messaging.Rules{
+			Default:    pf.Messaging.Default,
+			PerUrgency: convertPerUrgency(pf.Messaging.PerUrgency),
+		}
+	}
+	return r
+}
+
+// convertPerUrgency turns config's map[string][]string into the typed
+// map[messaging.Urgency][]string the router expects.
+func convertPerUrgency(in map[string][]string) map[messaging.Urgency][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[messaging.Urgency][]string, len(in))
+	for k, v := range in {
+		out[messaging.Urgency(k)] = v
+	}
+	return out
 }

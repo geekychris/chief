@@ -27,6 +27,50 @@ type Config struct {
 	// configured windows. Flags still land in the inbox + menu-bar
 	// count; only the noisy channel is muted.
 	DND DNDConfig `yaml:"dnd,omitempty"`
+	// Messaging backends + routing rules. Backends define plugins
+	// (ntfy, Pushover, Telegram, Slack, local-log); routing decides
+	// which fire for which urgency.
+	Messaging MessagingConfig `yaml:"messaging,omitempty"`
+}
+
+// MessagingConfig is the plugin + routing configuration for outbound
+// side channels. See internal/messaging.
+type MessagingConfig struct {
+	// Backends is the list of side-channel configurations. Each entry
+	// becomes one internal/messaging.Backend at chiefd boot. `type`
+	// selects the implementation; `name` is the label routing rules
+	// reference. Extra fields are backend-specific (e.g., topic for
+	// ntfy, path for log, token for pushover) — kept as a raw map to
+	// avoid one struct per backend variant.
+	Backends []BackendConfig `yaml:"backends,omitempty"`
+	// Routing: default backends per urgency, at the global level.
+	// Per-project overrides live in .chief/project.yaml under
+	// `messaging:`.
+	Routing RoutingConfig `yaml:"routing,omitempty"`
+}
+
+// BackendConfig is one entry under messaging.backends.
+type BackendConfig struct {
+	Name string `yaml:"name"`
+	Type string `yaml:"type"` // "log" | "ntfy" | "pushover" | "telegram" | "slack"
+	// Type-specific fields flattened into the top level for readability.
+	Path     string `yaml:"path,omitempty"`     // log: JSONL file path
+	Topic    string `yaml:"topic,omitempty"`    // ntfy: subscription topic
+	Server   string `yaml:"server,omitempty"`   // ntfy: base URL (defaults to ntfy.sh); pushover: unused
+	Token    string `yaml:"token,omitempty"`    // pushover: app token; telegram: bot token
+	User     string `yaml:"user,omitempty"`     // pushover: user key
+	ChatID   string `yaml:"chat_id,omitempty"`  // telegram: destination chat
+	Webhook  string `yaml:"webhook,omitempty"`  // slack: incoming webhook URL
+	Priority string `yaml:"priority,omitempty"` // ntfy/pushover: mapping override (rarely used)
+}
+
+// RoutingConfig is the global routing table. Empty PerUrgency means
+// every urgency uses Default. Set to nil for a specific urgency
+// (yaml: `attention: null`) to opt that urgency out of all backends.
+type RoutingConfig struct {
+	Default    []string              `yaml:"default,omitempty"`
+	PerUrgency map[string][]string   `yaml:"per_urgency,omitempty"`
+	Disable    bool                  `yaml:"disable,omitempty"`
 }
 
 // DNDConfig is the global DND window. Per-project overrides live in

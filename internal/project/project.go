@@ -32,12 +32,22 @@ func sha256Hex(b []byte) string {
 
 // ProjectFile is the on-disk .chief/project.yaml schema.
 type ProjectFile struct {
-	ID        string   `yaml:"id"`
-	Name      string   `yaml:"name"`
-	SpawnMode string   `yaml:"spawn_mode"` // attach|headless|spawn-interactive
-	Cmux      CmuxBind `yaml:"cmux"`
-	Idle      IdleCfg  `yaml:"idle,omitempty"`
-	DND       DNDCfg   `yaml:"dnd,omitempty"`
+	ID        string      `yaml:"id"`
+	Name      string      `yaml:"name"`
+	SpawnMode string      `yaml:"spawn_mode"` // attach|headless|spawn-interactive
+	Cmux      CmuxBind    `yaml:"cmux"`
+	Idle      IdleCfg     `yaml:"idle,omitempty"`
+	DND       DNDCfg      `yaml:"dnd,omitempty"`
+	Messaging MessagingCfg `yaml:"messaging,omitempty"`
+}
+
+// MessagingCfg is a per-project override of the global messaging
+// routing rules. Same shape as RoutingConfig in internal/config; set
+// disable=true to opt this project out of ALL side channels.
+type MessagingCfg struct {
+	Default    []string              `yaml:"default,omitempty"`
+	PerUrgency map[string][]string   `yaml:"per_urgency,omitempty"`
+	Disable    bool                  `yaml:"disable,omitempty"`
 }
 
 // IdleCfg tunes the idle-session sweeper on a per-project basis. Zero
