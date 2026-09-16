@@ -63,3 +63,48 @@ func HomebrewAvailable() bool {
 	_, err := exec.LookPath("brew")
 	return err == nil
 }
+
+// AppBundlePath returns the absolute path to a discovered History Viewer.app
+// bundle (Wails wrapper), or "" if none is found. User-local first.
+func AppBundlePath() string {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		filepath.Join(home, "Applications", "History Viewer.app"),
+		"/Applications/History Viewer.app",
+	} {
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// AppBinaryPath returns the inner Mach-O executable of the .app bundle so we
+// can invoke it directly with --args (LaunchServices does not reliably
+// forward CLI flags to Wails apps).
+func AppBinaryPath() string {
+	app := AppBundlePath()
+	if app == "" {
+		return ""
+	}
+	// wails.json's outputfilename → "HistoryViewer"
+	candidate := filepath.Join(app, "Contents", "MacOS", "HistoryViewer")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	// Fallback: first executable in Contents/MacOS/.
+	entries, err := os.ReadDir(filepath.Join(app, "Contents", "MacOS"))
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(app, "Contents", "MacOS", e.Name())
+		if info, err := os.Stat(p); err == nil && info.Mode().Perm()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
+}

@@ -146,10 +146,12 @@ type TaskReorderResponse struct {
 
 type HistoryViewerStatusRequest struct{}
 type HistoryViewerStatusResponse struct {
-	Installed  bool   `json:"installed"`
-	Binary     string `json:"binary,omitempty"`
-	HasBrew    bool   `json:"has_brew"`
-	InstallURL string `json:"install_url"`
+	Installed   bool   `json:"installed"`
+	Binary      string `json:"binary,omitempty"`
+	HasApp      bool   `json:"has_app"`
+	AppPath     string `json:"app_path,omitempty"`
+	HasBrew     bool   `json:"has_brew"`
+	InstallURL  string `json:"install_url"`
 }
 
 type HistoryViewerInstallRequest struct{}
@@ -169,10 +171,11 @@ type HistoryViewerOpenRequest struct {
 }
 
 type HistoryViewerOpenResponse struct {
-	URL      string `json:"url"`      // the URL Chief opened in the browser
+	URL       string `json:"url,omitempty"`       // the URL Chief opened in the browser (web-fallback path)
 	FilterDir string `json:"filter_dir"`
-	Port     int    `json:"port"`
-	Spawned  bool   `json:"spawned"`  // true = we launched a fresh process; false = existing instance reused
+	Port      int    `json:"port,omitempty"`
+	Spawned   bool   `json:"spawned"`             // true = we launched a fresh process; false = existing instance reused
+	Mode      string `json:"mode"`                // "app" (native Wails window) | "web" (browser)
 }
 
 // ---------- analyzer.install ----------

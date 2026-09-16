@@ -278,9 +278,13 @@ const historyViewerRepoURL = "https://github.com/geekychris/history_viewer"
 func handleHistoryViewerStatus() ipc.Handler {
 	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
 		installed, bin := historyviewer.IsInstalled()
+		app := historyviewer.AppBundlePath()
 		return methods.HistoryViewerStatusResponse{
-			Installed: installed, Binary: bin,
-			HasBrew: historyviewer.HomebrewAvailable(),
+			Installed:  installed,
+			Binary:     bin,
+			HasApp:     app != "",
+			AppPath:    app,
+			HasBrew:    historyviewer.HomebrewAvailable(),
 			InstallURL: historyViewerRepoURL,
 		}, nil
 	}
@@ -298,9 +302,11 @@ func handleHistoryViewerInstall() ipc.Handler {
 	}
 }
 
-// handleHistoryViewerOpen ensures a viewer instance is up on DefaultPort
-// (spawns one if not), then returns the deep-link URL for the requested
-// project. The Wails frontend opens that URL in the default browser.
+// handleHistoryViewerOpen prefers the native Wails-wrapper .app (which spawns
+// its own child web server and displays a native macOS window). Falls back to
+// spawning the raw CLI on a fixed loopback port + opening the default browser
+// when the .app isn't installed. Chief's UI opens the returned URL only in
+// the web-fallback mode.
 func handleHistoryViewerOpen(mgr *project.Manager) ipc.Handler {
 	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
 		var req methods.HistoryViewerOpenRequest
@@ -314,6 +320,23 @@ func handleHistoryViewerOpen(mgr *project.Manager) ipc.Handler {
 		if err != nil {
 			return nil, err
 		}
+
+		// Path 1: native app is installed — invoke its inner binary directly
+		// so --args reliably reaches Wails (LaunchServices' `open --args`
+		// doesn't consistently forward flags to Wails apps).
+		if appBin := historyviewer.AppBinaryPath(); appBin != "" {
+			cmd := exec.Command(appBin, "--filter-dir", p.Path)
+			cmd.Env = os.Environ()
+			if err := cmd.Start(); err != nil {
+				return nil, fmt.Errorf("spawn History Viewer.app: %w", err)
+			}
+			return methods.HistoryViewerOpenResponse{
+				FilterDir: p.Path, Spawned: true, Mode: "app",
+			}, nil
+		}
+
+		// Path 2: only the CLI is installed. Spawn on the fixed port + point
+		// the default browser at ?dir=<path>.
 		bin := historyviewer.BinaryPath()
 		if bin == "" {
 			return nil, &ipc.RPCError{Code: ipc.ErrCodeInternal, Message: "history_viewer is not installed; run historyviewer.install first"}
@@ -321,7 +344,6 @@ func handleHistoryViewerOpen(mgr *project.Manager) ipc.Handler {
 		port := historyviewer.DefaultPort
 		spawned := false
 		if !viewerAlive(port) {
-			// Spawn detached; server prints its own startup line to stderr.
 			cmd := exec.Command(bin,
 				"--ui", "web",
 				"--port", fmt.Sprintf("%d", port),
@@ -332,7 +354,6 @@ func handleHistoryViewerOpen(mgr *project.Manager) ipc.Handler {
 				return nil, fmt.Errorf("spawn history_viewer: %w", err)
 			}
 			spawned = true
-			// Poll for the server to come up (10s cap).
 			deadline := time.Now().Add(10 * time.Second)
 			for !viewerAlive(port) && time.Now().Before(deadline) {
 				time.Sleep(200 * time.Millisecond)
@@ -340,7 +361,7 @@ func handleHistoryViewerOpen(mgr *project.Manager) ipc.Handler {
 		}
 		u := fmt.Sprintf("http://127.0.0.1:%d/?dir=%s", port, url.QueryEscape(p.Path))
 		return methods.HistoryViewerOpenResponse{
-			URL: u, FilterDir: p.Path, Port: port, Spawned: spawned,
+			URL: u, FilterDir: p.Path, Port: port, Spawned: spawned, Mode: "web",
 		}, nil
 	}
 }
