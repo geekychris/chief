@@ -43,20 +43,14 @@
   Ingest usage from Claude's stream-json (headless mode) or shell out to `ccusage`. Show $/tokens per project and per task. Alert on budget overage. Feeds into DND ("stop pokes once daily budget hit").
 - [ ] {id:218b} Daily / weekly digest notification
   Rollup: N tasks done, M flagged, top time-sinks, projects with no activity, upcoming due dates. Send via all configured messaging backends. Schedule via `launchd`.
-- [ ] {id:1241} Idle-session detection + auto-recovery [priority:med]
-  Session in `working` state with no heartbeat for 30min → mark stale. Per `.chief/project.yaml` either notify me or restart (`spawn_mode`-dependent). Include the last-known active task in the notification for context.
 
 ## Agentic ergonomics
-- [ ] {id:2af2} Backlog templates (`chief task new --template feature|bug|refactor`)
-  Scaffolds the sub-bullet body with template-specific sections (acceptance criteria, test plan, rollback plan, non-goals).
 - [ ] {id:04b7} Voice / phone quick-add via Telegram
   Send a voice memo or text to the Telegram bot → Whisper transcription → new backlog item in the currently-focused project (or explicit `--project`). Extends the Telegram backend.
 - [ ] {id:e98f} Auto-branch-per-task
   When a session claims a task, chief runs `git switch -c chief/<task-id>-<slug>` in the project's cwd (guarded: skip if repo dirty). On `chief_complete_task`, prompt in the UI: merge / open PR / stay on branch.
 - [ ] {id:6fff} PR gating: don't mark task done until an associated PR is opened
   `chief_complete_task` warns (or blocks, per config) if no open PR references the task id. Uses `gh` CLI. Configurable per project.
-- [ ] {id:e155} Bulk task import — "paste a bunch of ideas, chief splits"
-  `chief task import < ideas.txt` uses a scoped Claude call to split freeform text into individual backlog items with suggested categories and priorities. Preview before committing to `backlog.md`.
 - [ ] {id:249e} Constitution linter
   Periodic sweep + post-turn hook: does the session's activity match `constitution.md`? Flag obvious divergences (e.g., constitution forbids network calls but Claude ran `curl`). Surface in the answer inbox as `info` urgency.
 - [ ] {id:d00a} Sync between machines

@@ -39,6 +39,7 @@ import (
 	"github.com/geekychris/chief/internal/ipc"
 	"github.com/geekychris/chief/internal/methods"
 	"github.com/geekychris/chief/internal/notify"
+	"github.com/geekychris/chief/internal/orchestrator"
 	"github.com/geekychris/chief/internal/project"
 	"github.com/geekychris/chief/internal/store"
 )
@@ -72,6 +73,14 @@ func run() error {
 	}
 	defer st.Close()
 	slog.Info("store opened", "path", dbPath)
+
+	// Global chief config. Loaded once up front so the sweeper and the
+	// method handlers share the same cmux socket auth. Absent config
+	// falls back to defaults + env vars — booting still works.
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Warn("config load", "err", err)
+	}
 
 	mgr := project.New(st)
 
@@ -145,8 +154,23 @@ func run() error {
 		return fmt.Errorf("chmod socket: %w", err)
 	}
 
+	// Idle-session sweeper: periodic supervisor that raises info-urgency
+	// flags when a project's cmux binding goes stale or its surface title
+	// hasn't changed for the configured idle timeout. Shim on top of
+	// existing cmux polling — a proper heartbeat-driven implementation
+	// arrives with M2 hooks.
+	idleCmux := &cmux.Client{Password: cfg.Cmux.SocketPassword, Socket: cfg.Cmux.SocketPath}
+	sweeper := &orchestrator.IdleSweeper{
+		Store: st, Projects: mgr, Cmux: idleCmux, Attention: att,
+	}
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		sweeper.Run(ctx)
+	}()
+
 	srv := ipc.NewServer()
-	registerMethods(srv, st, mgr, watcher, att)
+	registerMethods(srv, st, mgr, watcher, att, cfg)
 
 	slog.Info("chiefd started", "socket", sockPath, "version", Version, "pid", os.Getpid())
 
@@ -179,6 +203,7 @@ func run() error {
 	_ = ln.Close()
 	<-acceptDone
 	<-watchDone
+	<-sweepDone
 
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
@@ -228,7 +253,7 @@ func setupLogger() (*slog.Logger, func(), error) {
 
 // registerMethods wires the per-milestone method surface. Handlers close over
 // the store/manager/watcher via method-level factories to avoid globals.
-func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager) {
+func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fswatch.Watcher, att *attention.Manager, cfg config.Config) {
 	s.Register("ping", handlePing)
 	s.Register("project.add", handleProjectAdd(st, mgr, w))
 	s.Register("project.list", handleProjectList(st))
@@ -242,14 +267,8 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("task.delete", handleTaskDelete(mgr))
 
 	// cmux integration (Feature B — send task to a running Claude pane).
-	// The cmux socket enforces access control; chiefd (not spawned inside
-	// cmux) needs a password. Loaded from ~/.../Chief/config.yaml; falls
-	// back to CMUX_SOCKET_PASSWORD / CMUX_SOCKET_CAPABILITY env inside the
-	// cmux.Client if config is missing (useful during first-time bootstrap).
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Warn("config load", "err", err)
-	}
+	// Shares cfg with the sweeper wired in run() so both use the same
+	// socket auth.
 	cmuxClient := &cmux.Client{
 		Password: cfg.Cmux.SocketPassword,
 		Socket:   cfg.Cmux.SocketPath,

@@ -1,5 +1,8 @@
 # Completed
 
+- [x] {id:1241} Idle-session detection + auto-recovery [category:Multi-project coordination] (done 2026-09-16 03:39)
+- [x] {id:2af2} Backlog templates (`chief task new --template feature|bug|refactor`) [category:Agentic ergonomics] (done 2026-09-16 03:39)
+- [x] {id:e155} Bulk task import — "paste a bunch of ideas, chief splits" [category:Agentic ergonomics] (done 2026-09-16 03:39)
 - [x] {id:2c8f} "Next task" prompt when a session completes and backlog has more work [priority:5] [category:Attention & notifications] (done 2026-09-16 03:09)
 - [x] {id:7247} `chief_reply_to_flag` MCP tool for programmatic replies [priority:5] [category:Attention & notifications] (done 2026-09-16 03:09)
 - [x] {id:45e5} Unified "answer inbox" pane listing every awaiting question across all projects [priority:5] [category:Attention & notifications] (done 2026-09-16 03:09)

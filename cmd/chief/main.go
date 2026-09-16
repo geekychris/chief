@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -273,7 +275,161 @@ func backlogListCmd() *cobra.Command {
 
 func taskCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "Inspect individual tasks"}
-	cmd.AddCommand(taskShowCmd())
+	cmd.AddCommand(taskShowCmd(), taskNewCmd(), taskImportCmd())
+	return cmd
+}
+
+// backlogTemplates are the built-in scaffolds for `chief task new
+// --template`. Kept as a plain map so adding a new one is a single-line
+// change; no external files, no wiring. Each template's Body becomes the
+// checkbox body (indented sub-bullets) in backlog.md — the shape the
+// parser already understands.
+var backlogTemplates = map[string]struct {
+	Category string
+	Body     string
+}{
+	"feature": {
+		Category: "Features",
+		Body: `**Goal:** why does this exist and who benefits.
+
+**Acceptance criteria:**
+- [ ]
+- [ ]
+- [ ]
+
+**Test plan:** what proves this works.
+
+**Non-goals:** what this deliberately does NOT do.
+
+**Rollout:** flag, gate, or ship direct.`,
+	},
+	"bug": {
+		Category: "Bugs",
+		Body: `**Symptom:** what the user sees.
+
+**Repro steps:**
+1.
+2.
+3.
+
+**Expected:**
+**Actual:**
+
+**Root cause hypothesis:**
+
+**Fix approach:**
+
+**Regression test:** how we prove it doesn't come back.`,
+	},
+	"refactor": {
+		Category: "Refactors",
+		Body: `**Motivation:** why now.
+
+**Current shape:** what's in the code today.
+
+**Target shape:** what it should look like after.
+
+**Migration steps:**
+1.
+2.
+3.
+
+**Rollback plan:** how to revert if something goes wrong.
+
+**Risk:** what could break.`,
+	},
+	"chore": {
+		Category: "Chores",
+		Body: `**What:** the specific change.
+
+**Why:** the trigger (dep bump, deprecation, cleanup, etc.).
+
+**Verify:** how we know it's done.`,
+	},
+}
+
+func taskNewCmd() *cobra.Command {
+	var project, template, category, body string
+	var priority int
+	var jsonOut, dryRun bool
+	cmd := &cobra.Command{
+		Use:   "new <title...>",
+		Short: "Create a new task, optionally from a template scaffold.",
+		Long: `Append a new task to a project's backlog.md.
+
+With --template <name>, prefills the body with a scaffold (feature|bug|refactor|chore).
+Without --template, creates a plain task with an empty body (or --body TEXT).
+
+Examples:
+  chief task new "add auth callback" --template feature --project chief
+  chief task new "fix login redirect" -t bug -p 5
+  chief task new "bump go modules" -t chore --dry-run`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			title := strings.Join(args, " ")
+			if project == "" {
+				p, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				project = p
+			}
+			// Resolve template scaffold.
+			if template != "" {
+				t, ok := backlogTemplates[template]
+				if !ok {
+					names := make([]string, 0, len(backlogTemplates))
+					for k := range backlogTemplates {
+						names = append(names, k)
+					}
+					return fmt.Errorf("unknown template %q — available: %s", template, strings.Join(names, ", "))
+				}
+				if category == "" {
+					category = t.Category
+				}
+				if body == "" {
+					body = t.Body
+				}
+			}
+			if dryRun {
+				fmt.Printf("[dry-run] would add to %s:\n", project)
+				fmt.Printf("  Title:    %s\n", title)
+				fmt.Printf("  Category: %s\n", category)
+				fmt.Printf("  Priority: %d\n", priority)
+				if body != "" {
+					fmt.Println("  Body:")
+					for _, line := range strings.Split(body, "\n") {
+						fmt.Println("    " + line)
+					}
+				}
+				return nil
+			}
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.TaskAddResponse
+			if err := c.Call("task.add", methods.TaskAddRequest{
+				ProjectID: project, Title: title, Body: body,
+				Category: category, Priority: priority,
+			}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			fmt.Printf("added task %s in %s\n", resp.Task.ID, resp.Task.ProjectID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "project id/name/path (default: cwd)")
+	cmd.Flags().StringVarP(&template, "template", "t", "", "scaffold: feature|bug|refactor|chore")
+	cmd.Flags().StringVar(&category, "category", "", "backlog.md section header (default: template's category, else 'Backlog')")
+	cmd.Flags().StringVar(&body, "body", "", "task body (indented sub-bullets); overrides template body")
+	cmd.Flags().IntVarP(&priority, "priority", "p", 0, "priority tag")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the scaffolded task and exit without writing")
 	return cmd
 }
 
@@ -326,6 +482,233 @@ func taskShowCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
 	return cmd
+}
+
+// taskImportCmd splits freeform text into structured tasks via a scoped
+// `claude -p` call, previews the result, and (on confirm) appends each
+// item to the target project's backlog.md via the existing task.add RPC.
+//
+// The scoped prompt asks Claude to return a JSON array only, so we can
+// parse without hand-rolling markdown extraction. Two safety valves:
+// --dry-run to see the split without writing, and --yes to skip the
+// interactive confirm (for scripting).
+func taskImportCmd() *cobra.Command {
+	var project, file, claudeBin, categoryOverride string
+	var priorityOverride int
+	var dryRun, yes, jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "import",
+		Short: "Split freeform text into backlog items via Claude, then append them.",
+		Long: `Read freeform text from --file or stdin, shell to Claude to split
+it into structured tasks, preview the result, and (on confirm) append
+each item to the target project's backlog.md.
+
+Examples:
+  chief task import --project chief < ideas.txt
+  echo "auth callback, dark mode toggle" | chief task import -p 3
+  chief task import -f ideas.md --dry-run
+  chief task import -f ideas.md --yes            # scripting
+
+Requires 'claude' (or --claude-bin PATH) on PATH.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Read input.
+			var raw []byte
+			var err error
+			if file != "" {
+				raw, err = os.ReadFile(file)
+			} else {
+				raw, err = readAllStdin()
+			}
+			if err != nil {
+				return fmt.Errorf("read input: %w", err)
+			}
+			text := strings.TrimSpace(string(raw))
+			if text == "" {
+				return errors.New("no input text (use --file or pipe via stdin)")
+			}
+
+			// Resolve project (default cwd).
+			if project == "" {
+				p, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				project = p
+			}
+
+			// Split via Claude.
+			bin := claudeBin
+			if bin == "" {
+				bin = "claude"
+			}
+			items, err := splitTextViaClaude(bin, text)
+			if err != nil {
+				return fmt.Errorf("split via claude: %w", err)
+			}
+			if len(items) == 0 {
+				return errors.New("claude returned zero tasks — try clarifying the input")
+			}
+
+			// Apply overrides.
+			for i := range items {
+				if categoryOverride != "" {
+					items[i].Category = categoryOverride
+				}
+				if priorityOverride != 0 {
+					items[i].Priority = priorityOverride
+				}
+			}
+
+			// Preview.
+			if jsonOut {
+				return jsonPrint(struct {
+					Items []importItem `json:"items"`
+				}{items})
+			}
+			fmt.Printf("would add %d task(s) to %s:\n\n", len(items), project)
+			for i, it := range items {
+				fmt.Printf("  %d. [%s | prio %d] %s\n", i+1, it.Category, it.Priority, it.Title)
+				if it.Body != "" {
+					for _, line := range strings.Split(it.Body, "\n") {
+						fmt.Println("      " + line)
+					}
+				}
+			}
+			fmt.Println()
+
+			if dryRun {
+				fmt.Println("(dry-run — nothing written)")
+				return nil
+			}
+			if !yes {
+				fmt.Print("Proceed? [y/N] ")
+				var ans string
+				_, _ = fmt.Scanln(&ans)
+				if !strings.EqualFold(strings.TrimSpace(ans), "y") &&
+					!strings.EqualFold(strings.TrimSpace(ans), "yes") {
+					fmt.Println("aborted.")
+					return nil
+				}
+			}
+
+			// Add each via existing task.add RPC.
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			added := 0
+			for _, it := range items {
+				var resp methods.TaskAddResponse
+				if err := c.Call("task.add", methods.TaskAddRequest{
+					ProjectID: project, Title: it.Title, Body: it.Body,
+					Category: it.Category, Priority: it.Priority,
+				}, &resp); err != nil {
+					fmt.Fprintf(os.Stderr, "skip %q: %v\n", it.Title, err)
+					continue
+				}
+				fmt.Printf("added %s: %s\n", resp.Task.ID, resp.Task.Title)
+				added++
+			}
+			fmt.Printf("\ndone — %d/%d task(s) added.\n", added, len(items))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "project id/name/path (default: cwd)")
+	cmd.Flags().StringVarP(&file, "file", "f", "", "read text from a file instead of stdin")
+	cmd.Flags().StringVar(&claudeBin, "claude-bin", "", "override the claude binary (default: 'claude' on PATH)")
+	cmd.Flags().StringVar(&categoryOverride, "category", "", "override the category on every generated task")
+	cmd.Flags().IntVarP(&priorityOverride, "priority", "p", 0, "override the priority on every generated task")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the split and exit without writing")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the interactive confirm")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON items and exit (implies dry-run)")
+	return cmd
+}
+
+// importItem is the JSON shape we ask Claude to emit + parse on our side.
+type importItem struct {
+	Title    string `json:"title"`
+	Body     string `json:"body,omitempty"`
+	Category string `json:"category,omitempty"`
+	Priority int    `json:"priority,omitempty"`
+}
+
+// splitTextViaClaude shells to `claude -p '<prompt>'` with a scoped
+// system-like prompt that demands JSON-only output. We accept either
+// {"items":[...]} or a bare array. The prompt is intentionally strict
+// about "no prose, no markdown fences" — Claude will still add fences
+// sometimes so we strip the outermost pair defensively before parsing.
+func splitTextViaClaude(bin, text string) ([]importItem, error) {
+	prompt := "You will split a freeform brain-dump into individual backlog items " +
+		"for a task tracker.\n\n" +
+		"Rules:\n" +
+		"- Output ONLY a single JSON array. No prose, no explanation, no markdown fences.\n" +
+		"- Each item must have: title (short imperative, <70 chars), body (detail as " +
+		"markdown sub-bullets or paragraphs, may be empty), category (short section name), " +
+		"priority (integer 0-9; 5=high, 3=med, 0=low, guess based on urgency wording).\n" +
+		"- Preserve the user's original wording where possible.\n" +
+		"- Do not invent tasks that aren't in the input.\n\n" +
+		"Input text:\n---\n" + text + "\n---\n\n" +
+		"Return only the JSON array."
+
+	cmd := exec.Command(bin, "-p", prompt)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("%s -p: %w (stderr: %s)", bin, err, string(ee.Stderr))
+		}
+		return nil, fmt.Errorf("%s -p: %w", bin, err)
+	}
+	body := strings.TrimSpace(string(out))
+	body = stripFences(body)
+	// Accept either bare array or {"items":[...]}.
+	var arr []importItem
+	if err := json.Unmarshal([]byte(body), &arr); err == nil {
+		return arr, nil
+	}
+	var wrapped struct {
+		Items []importItem `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(body), &wrapped); err == nil {
+		return wrapped.Items, nil
+	}
+	return nil, fmt.Errorf("claude returned non-JSON output (first 200 chars): %q", clip(body, 200))
+}
+
+// stripFences removes a wrapping ``` or ```json ... ``` if present, so
+// we don't need Claude to be perfectly obedient.
+func stripFences(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	// Drop first line (```json or ```) and last line if it's the closing fence.
+	lines := strings.SplitN(s, "\n", 2)
+	if len(lines) < 2 {
+		return s
+	}
+	rest := lines[1]
+	if idx := strings.LastIndex(rest, "```"); idx >= 0 {
+		return strings.TrimSpace(rest[:idx])
+	}
+	return strings.TrimSpace(rest)
+}
+
+func readAllStdin() ([]byte, error) {
+	// Only read when stdin is piped/redirected — a bare invocation on a
+	// tty would hang waiting for EOF.
+	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+		return nil, errors.New("stdin is a terminal; use --file or pipe input")
+	}
+	return io.ReadAll(os.Stdin)
+}
+
+// clip truncates a string for error messages.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // ---------- flag / inbox / answer / next ----------

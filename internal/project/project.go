@@ -36,6 +36,17 @@ type ProjectFile struct {
 	Name      string   `yaml:"name"`
 	SpawnMode string   `yaml:"spawn_mode"` // attach|headless|spawn-interactive
 	Cmux      CmuxBind `yaml:"cmux"`
+	Idle      IdleCfg  `yaml:"idle,omitempty"`
+}
+
+// IdleCfg tunes the idle-session sweeper on a per-project basis. Zero
+// values fall back to global defaults (internal/orchestrator constants).
+type IdleCfg struct {
+	// TimeoutMinutes: mark the surface possibly-idle when the cmux
+	// surface title hasn't changed for this many minutes. 0 → default.
+	TimeoutMinutes int `yaml:"timeout_minutes,omitempty"`
+	// Disable turns off the sweeper for this project entirely.
+	Disable bool `yaml:"disable,omitempty"`
 }
 
 // CmuxBind records the cmux workspace/surface this project is associated with.
