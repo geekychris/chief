@@ -150,6 +150,27 @@ select { background: var(--bg-elev); color: var(--text); border: 1px solid var(-
 .st-done { color: var(--good); text-decoration: line-through; opacity: 0.7; }
 .st-dropped { color: var(--text-dim); text-decoration: line-through; opacity: 0.5; font-style: italic; }
 
+.toast {
+  position: fixed;
+  top: 60px;
+  right: 20px;
+  z-index: 200;
+  padding: 10px 14px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 6px;
+  font-size: 12px;
+  max-width: 460px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.error { border-color: var(--bad); background: rgba(200, 60, 60, 0.15); }
+
 .project-meta {
   padding: 14px;
   border-top: 1px solid var(--border);

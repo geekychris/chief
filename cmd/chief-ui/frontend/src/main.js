@@ -736,25 +736,51 @@ async function deleteCurrentTask() {
     alert('Only backlog.md items can be dropped in-app. Historical items in completedlog.md / dropped.md stay as archives.');
     return;
   }
-  if (!confirm(`Drop task ${t.id}?\n\n${t.title}\n\nRemoves from backlog.md and archives to dropped.md.`)) return;
+  // No confirm() dialog — we soft-delete (archive to dropped.md), and the
+  // toast below offers immediate visual confirmation + a path to recover.
   const droppedId = t.id;
+  const droppedTitle = t.title;
+  // Optimistic UI: strip the row from local state and hide the detail
+  // drawer BEFORE the RPC returns, so the row disappears the instant the
+  // Delete button is clicked. Otherwise the fsnotify -> Rescan ->
+  // ListBacklog roundtrip can take a beat and read as "delete didn't fire".
+  state.selectedTaskId = '';
+  state.batchSelection.delete(droppedId);
+  els.detail.classList.add('hidden');
+  state.tasks = (state.tasks || []).filter(x => x.id !== droppedId);
+  renderSidebar();
+  renderBacklog();
+  showToast(`Dropped ${droppedId} — ${clip(droppedTitle, 60)}. Archived to dropped.md.`);
   try {
     await DeleteTask(droppedId);
-    state.selectedTaskId = '';
-    state.batchSelection.delete(droppedId);
-    els.detail.classList.add('hidden');
-    // Optimistic UI: strip the row from local state so the visual update
-    // fires immediately, before the refreshAll roundtrip. Otherwise the
-    // fsnotify -> Rescan -> ListBacklog chain can take a beat and the
-    // row briefly stays visible, reading as "delete didn't work".
-    state.tasks = (state.tasks || []).filter(x => x.id !== droppedId);
-    renderSidebar();
-    renderBacklog();
-    // Then reconcile with the authoritative server state.
     await refreshAll();
   } catch (e) {
-    alert('Drop failed: ' + (e.message || e));
+    // Rollback: re-refresh authoritative state and surface the error.
+    await refreshAll();
+    showToast(`Drop failed: ${e.message || e}`, /*isError*/ true);
   }
+}
+
+function clip(s, n) {
+  s = String(s || '');
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+
+// showToast displays a small transient status message in the top-right of
+// the main pane.  Used for optimistic-UI feedback (drop, batch send, etc.).
+function showToast(text, isError = false) {
+  let toast = document.getElementById('toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'toast';
+    toast.className = 'toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.classList.toggle('error', !!isError);
+  toast.classList.add('show');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => toast.classList.remove('show'), isError ? 6000 : 3200);
 }
 
 async function reorderTask(taskId, direction) {

@@ -79,13 +79,18 @@ install-menu: app-bundle-menu
 	install -m 0644 $(MENU_PLIST) $(LAUNCHAGENTS)/$(MENU_PLIST_LABEL).plist
 	@$(MAKE) reload-menu
 
-# Install the main-window app as Chief.app. Launch manually (or via the menu-bar
-# "Open Chief window" item). Not under launchctl — user decides when to open it.
+# Install the main-window app as Chief.app. Also kills any running instance
+# so the next launch picks up the new bundle — macOS never auto-swaps a
+# Wails app when you cp -R a new build over the on-disk bundle. Manually
+# quit + reopen would work too, but killing first makes the flow reliable.
 install-ui: app-bundle-ui
 	@mkdir -p $(APPS_DIR)
+	-@pkill -f "$(APP_BUNDLE_UI)/Contents/MacOS/Chief" 2>/dev/null; sleep 0.3
 	rm -rf $(APPS_DIR)/$(APP_BUNDLE_UI)
 	cp -R $(UI_BUILT_APP) $(APPS_DIR)/
-	@echo "Chief.app installed at $(APPS_DIR)/$(APP_BUNDLE_UI). Open it from the menu bar, Spotlight, or: open -a Chief"
+	@echo "Chief.app installed at $(APPS_DIR)/$(APP_BUNDLE_UI)."
+	@echo "Launched a fresh instance:"
+	@open -a Chief 2>/dev/null || true
 
 # Install everything (daemon, CLI, menu bar, main window) in one shot.
 install-all: install install-menu install-ui
