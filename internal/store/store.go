@@ -489,6 +489,57 @@ func (s *Store) SearchTasks(ctx context.Context, query string, limit int) ([]Tas
 	return out, rows.Err()
 }
 
+// StaleTasks returns pending or active tasks that have been in that
+// state longer than the configured thresholds. Substitutes the real
+// "revive_count" heuristic (which requires the claim flow / MCP layer
+// that hasn't shipped) with age-based signals derived from created_at
+// and claimed_at.
+//
+//   pendingCutoff: pending tasks older than this age → outlier
+//   activeCutoff:  active tasks whose claim exceeds this age → outlier
+//
+// A zero cutoff disables that half. Results sorted by (status, oldest first).
+func (s *Store) StaleTasks(ctx context.Context, pendingCutoff, activeCutoff time.Time) ([]Task, error) {
+	// Two-part query: pending WHERE created_at < pendingCutoff
+	//                 OR active WHERE claimed_at < activeCutoff
+	// UNION'd. Blocked/deferred/done/dropped are excluded (they're
+	// explicitly-parked states, not "stuck in progress").
+	q := `
+		SELECT id, project_id, title, body, source_file, source_line_hash,
+		       source_line, status, priority, category, required_resources,
+		       blocks, blocked_by, due,
+		       claimed_at, claimed_by_session, revive_count,
+		       created_at, completed_at
+		  FROM tasks
+		 WHERE (status = 'pending' AND created_at < ?)
+		    OR (status = 'active'  AND claimed_at < ?)
+		 ORDER BY status ASC, created_at ASC`
+	pCut := pendingCutoff.UTC().Format(time.RFC3339)
+	aCut := activeCutoff.UTC().Format(time.RFC3339)
+	// If a cutoff was disabled, pass a sentinel from year 3000 so the
+	// clause never matches — simpler than dynamic SQL.
+	if pendingCutoff.IsZero() {
+		pCut = "3000-01-01T00:00:00Z"
+	}
+	if activeCutoff.IsZero() {
+		aCut = "3000-01-01T00:00:00Z"
+	}
+	rows, err := s.db.QueryContext(ctx, q, pCut, aCut)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // NextPending returns the top-N pending tasks across ALL projects ranked
 // by (priority DESC, source_line ASC, created_at ASC). This powers the
 // "which project should I focus on right now" view — the CLI subcommand

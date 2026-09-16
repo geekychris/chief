@@ -144,6 +144,20 @@ type StatsPerProject struct {
 	CompletedWindow int   `json:"completed_window"`
 }
 
+// ---------- outliers ----------
+
+// OutliersRequest asks for tasks that have been stuck (pending too
+// long or active too long). Zero values use the defaults (30d
+// pending, 4h active).
+type OutliersRequest struct {
+	PendingDays   int `json:"pending_days,omitempty"`
+	ActiveHours   int `json:"active_hours,omitempty"`
+}
+
+type OutliersResponse struct {
+	Tasks []BacklogRow `json:"tasks"`
+}
+
 // ---------- backlog.next ----------
 
 // BacklogNextRequest asks for the top-N pending tasks system-wide, ranked

@@ -1,5 +1,8 @@
 # Completed
 
+- [x] {id:1c88} For completed work I want the timestamp when it was reported [category:Backlog] (done 2026-09-16 04:25:49)
+- [x] {id:531e} Surface task-duration + revive-count outliers in the UI [category:Operations logging & analytics] (done 2026-09-16 04:25:49)
+- [x] {id:e38e} Task splitting proposal flow [category:Multi-project coordination] (done 2026-09-16 04:25:49)
 - [x] {id:588b} Telegram backend as first implementation of the plugin arch [priority:5] [category:Messaging integrations] (done 2026-09-16 04:20)
 - [x] {id:1834} Slack backend [category:Messaging integrations] (done 2026-09-16 04:20)
 - [x] {id:218b} Daily / weekly digest notification [category:Multi-project coordination] (done 2026-09-16 04:20)

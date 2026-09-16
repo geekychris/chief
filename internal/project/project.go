@@ -419,7 +419,7 @@ func (m *Manager) DeleteTaskWithReason(ctx context.Context, taskID, reason strin
 	}
 	newDropped := backlog.PrependDropped(droppedContent, backlog.DroppedInput{
 		ID: t.ID, Title: t.Title, Priority: t.Priority, Category: t.Category,
-		DroppedAt: time.Now().UTC().Format("2006-01-02 15:04"),
+		DroppedAt: time.Now().UTC().Format("2006-01-02 15:04:05"),
 		Reason:    reason,
 	})
 	if newDropped != droppedContent {
@@ -620,7 +620,10 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 			t := sweptTasks[i]
 			doneAt := t.CompletedAt
 			if doneAt == "" {
-				doneAt = time.Now().UTC().Format("2006-01-02 15:04")
+				// Seconds precision (1c88) — makes it possible to reconstruct
+				// order-of-completion when many items are marked done in
+				// the same minute (common with batch send-and-mark flows).
+				doneAt = time.Now().UTC().Format("2006-01-02 15:04:05")
 			}
 			newCompleted = backlog.PrependCompletion(newCompleted, backlog.CompletionInput{
 				ID: t.ID, Title: t.Title, Priority: t.Priority,
@@ -816,7 +819,11 @@ func toStoreTask(t backlog.Task, projectID, sourceFile string) store.Task {
 	if t.CompletedAt != "" {
 		if v, err := time.Parse("2006-01-02", t.CompletedAt); err == nil {
 			s.CompletedAt = &v
+		} else if v, err := time.Parse("2006-01-02 15:04:05", t.CompletedAt); err == nil {
+			s.CompletedAt = &v
 		} else if v, err := time.Parse("2006-01-02 15:04", t.CompletedAt); err == nil {
+			// Legacy minute-precision entries — kept for backward
+			// compat with completedlog.md files written pre-1c88.
 			s.CompletedAt = &v
 		}
 	}

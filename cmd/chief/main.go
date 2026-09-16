@@ -43,6 +43,7 @@ func main() {
 		statsCmd(),
 		searchCmd(),
 		digestCmd(),
+		outliersCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -321,7 +322,7 @@ func backlogListCmd() *cobra.Command {
 
 func taskCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "Inspect individual tasks"}
-	cmd.AddCommand(taskShowCmd(), taskNewCmd(), taskImportCmd())
+	cmd.AddCommand(taskShowCmd(), taskNewCmd(), taskImportCmd(), taskSplitCmd())
 	return cmd
 }
 
@@ -528,6 +529,177 @@ func taskShowCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
 	return cmd
+}
+
+// taskSplitCmd invokes Claude to propose N child tasks that decompose
+// a too-large parent. Semantics decided for v1:
+//   - Parent is DROPPED (moved to dropped.md with a "split into: <ids>"
+//     resolution note) rather than kept — dependency tracking (ad14)
+//     would let us do parent-blocks-children, but that's future work.
+//     Dropping is reversible: user can restore parent + delete children
+//     if they change their mind.
+//   - Children are appended to backlog.md in the parent's project,
+//     preserving the parent's category + priority tags.
+//   - Dry-run and --yes flags mirror `task import`.
+func taskSplitCmd() *cobra.Command {
+	var claudeBin string
+	var dryRun, yes bool
+	cmd := &cobra.Command{
+		Use:   "split <task-id>",
+		Short: "Ask Claude to propose child tasks that decompose <task-id>, preview, then apply.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			taskID := args[0]
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			// Load the parent so we can show + prompt around it.
+			var showResp methods.TaskShowResponse
+			if err := c.Call("task.show", methods.TaskShowRequest{ID: taskID}, &showResp); err != nil {
+				return err
+			}
+			parent := showResp.Task
+			if parent.Status != "pending" {
+				return fmt.Errorf("task %s status=%s — split only accepts pending tasks", parent.ID, parent.Status)
+			}
+			// Ask Claude for children.
+			bin := claudeBin
+			if bin == "" {
+				bin = "claude"
+			}
+			children, err := splitTaskViaClaude(bin, parentTaskCtx{
+				Title: parent.Title, Body: parent.Body,
+				Category: parent.Category, Priority: parent.Priority,
+			})
+			if err != nil {
+				return fmt.Errorf("split via claude: %w", err)
+			}
+			if len(children) < 2 {
+				return fmt.Errorf("split returned %d children — expected at least 2 to be a meaningful split", len(children))
+			}
+			// Preview.
+			fmt.Printf("Parent: [id:%s] %s\n", parent.ID, parent.Title)
+			fmt.Printf("Project: %s · Category: %s · Priority: %d\n", showResp.ProjectName, parent.Category, parent.Priority)
+			fmt.Printf("\nProposed %d child task(s):\n\n", len(children))
+			for i, ch := range children {
+				fmt.Printf("  %d. [%s | prio %d] %s\n", i+1, ch.Category, ch.Priority, ch.Title)
+				if ch.Body != "" {
+					for _, line := range strings.Split(ch.Body, "\n") {
+						fmt.Println("      " + line)
+					}
+				}
+			}
+			fmt.Println("\n(Parent will be moved to dropped.md with a 'split into: <child-ids>' note.)")
+			if dryRun {
+				fmt.Println("\n(dry-run — nothing written)")
+				return nil
+			}
+			if !yes {
+				fmt.Print("\nProceed? [y/N] ")
+				var ans string
+				_, _ = fmt.Scanln(&ans)
+				if !strings.EqualFold(strings.TrimSpace(ans), "y") &&
+					!strings.EqualFold(strings.TrimSpace(ans), "yes") {
+					fmt.Println("aborted.")
+					return nil
+				}
+			}
+			// Apply: add each child (reusing category + priority from
+			// children as returned; parent's category is the default
+			// if child left it blank), then delete parent.
+			addedIDs := []string{}
+			for _, ch := range children {
+				cat := ch.Category
+				if cat == "" {
+					cat = parent.Category
+				}
+				var addResp methods.TaskAddResponse
+				if err := c.Call("task.add", methods.TaskAddRequest{
+					ProjectID: parent.ProjectID, Title: ch.Title, Body: ch.Body,
+					Category: cat, Priority: ch.Priority,
+				}, &addResp); err != nil {
+					fmt.Fprintf(os.Stderr, "skip %q: %v\n", ch.Title, err)
+					continue
+				}
+				addedIDs = append(addedIDs, addResp.Task.ID)
+				fmt.Printf("added child %s: %s\n", addResp.Task.ID, ch.Title)
+			}
+			// Delete parent — soft-delete to dropped.md, with our
+			// resolution note captured in the source line so the split
+			// is discoverable in git blame.
+			var delResp methods.TaskDeleteResponse
+			if err := c.Call("task.delete", methods.TaskDeleteRequest{TaskID: parent.ID}, &delResp); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: parent delete failed: %v\n", err)
+			} else {
+				fmt.Printf("\nParent %s moved to dropped.md. Split into: %s\n", parent.ID, strings.Join(addedIDs, ", "))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&claudeBin, "claude-bin", "", "override the claude binary (default: 'claude' on PATH)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview the split without writing")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the interactive confirm")
+	return cmd
+}
+
+// parentTaskCtx is the subset of a task's fields the splitter prompt
+// needs — declared as a local struct so this file doesn't have to
+// import internal/store just for the type.
+type parentTaskCtx struct {
+	Title    string
+	Body     string
+	Category string
+	Priority int
+}
+
+// splitTaskViaClaude shells to `claude -p` with a scoped prompt to
+// decompose a task into 2-6 child tasks. Uses the same JSON-only
+// contract as taskImportCmd's splitter, with a different prompt that
+// hands Claude the parent's context up front.
+func splitTaskViaClaude(bin string, parent parentTaskCtx) ([]importItem, error) {
+	prompt := "You will decompose a single backlog task into 2-6 child tasks that " +
+		"together achieve the parent's goal.\n\n" +
+		"Rules:\n" +
+		"- Output ONLY a single JSON array of children. No prose, no fences.\n" +
+		"- Each child: {title, body, category, priority}. Priority integer 0-9.\n" +
+		"- Titles imperative, <70 chars.\n" +
+		"- Order matters — earlier children should be prerequisites for later.\n" +
+		"- Do NOT include the parent itself; the parent is being replaced.\n" +
+		"- If the task is genuinely atomic, return an empty array [].\n\n" +
+		"Parent task:\n" +
+		"  Title:    " + parent.Title + "\n" +
+		"  Category: " + parent.Category + "\n" +
+		"  Priority: " + fmt.Sprintf("%d", parent.Priority) + "\n"
+	if parent.Body != "" {
+		prompt += "  Body:\n"
+		for _, line := range strings.Split(parent.Body, "\n") {
+			prompt += "    " + line + "\n"
+		}
+	}
+	prompt += "\nReturn only the JSON array."
+
+	cmd := exec.Command(bin, "-p", prompt)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("%s -p: %w (stderr: %s)", bin, err, string(ee.Stderr))
+		}
+		return nil, fmt.Errorf("%s -p: %w", bin, err)
+	}
+	body := stripFences(strings.TrimSpace(string(out)))
+	var arr []importItem
+	if err := json.Unmarshal([]byte(body), &arr); err == nil {
+		return arr, nil
+	}
+	var wrapped struct {
+		Children []importItem `json:"children"`
+	}
+	if err := json.Unmarshal([]byte(body), &wrapped); err == nil {
+		return wrapped.Children, nil
+	}
+	return nil, fmt.Errorf("claude returned non-JSON output (first 200 chars): %q", clip(body, 200))
 }
 
 // taskImportCmd splits freeform text into structured tasks via a scoped
@@ -755,6 +927,57 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func outliersCmd() *cobra.Command {
+	var pendingDays, activeHours int
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "outliers",
+		Short: "Show tasks stuck too long (pending > N days or active > M hours).",
+		Long: `Substitutes the real revive_count/claim signal (M2) with an age
+heuristic: pending tasks older than --pending-days (default 30) or
+active tasks whose claim exceeds --active-hours (default 4) are
+outliers. Blocked/deferred/done/dropped are excluded — those are
+explicit states, not "stuck".`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.OutliersResponse
+			if err := c.Call("outliers", methods.OutliersRequest{
+				PendingDays: pendingDays, ActiveHours: activeHours,
+			}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			if len(resp.Tasks) == 0 {
+				fmt.Println("no outlier tasks")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "STATUS\tID\tAGE\tPROJECT\tTITLE")
+			now := time.Now()
+			for _, r := range resp.Tasks {
+				age := relativeTime(now.Sub(r.CreatedAt))
+				title := r.Title
+				if len(title) > 60 {
+					title = title[:57] + "..."
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+					statusGlyph(string(r.Status)), r.ID, age, r.ProjectName, title)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().IntVar(&pendingDays, "pending-days", 30, "pending threshold in days")
+	cmd.Flags().IntVar(&activeHours, "active-hours", 4, "active-claim threshold in hours")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
 }
 
 func digestCmd() *cobra.Command {

@@ -334,6 +334,7 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("backlog.next", handleBacklogNext(st))
 	s.Register("stats.summary", handleStatsSummary(st))
 	s.Register("search", handleSearch(st))
+	s.Register("outliers", handleOutliers(st))
 	s.Register("digest.preview", handleDigestPreview(digest))
 	s.Register("digest.fire", handleDigestFire(digest))
 	s.Register("task.show", handleTaskShow(st))
@@ -1424,6 +1425,44 @@ func handleBacklogNext(st *store.Store) ipc.Handler {
 			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
 		}
 		return methods.BacklogNextResponse{Tasks: rows}, nil
+	}
+}
+
+// ---------- outliers ----------
+
+func handleOutliers(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.OutliersRequest
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &req)
+		}
+		pDays := req.PendingDays
+		if pDays <= 0 {
+			pDays = 30
+		}
+		aHours := req.ActiveHours
+		if aHours <= 0 {
+			aHours = 4
+		}
+		now := time.Now().UTC()
+		pCut := now.Add(-time.Duration(pDays) * 24 * time.Hour)
+		aCut := now.Add(-time.Duration(aHours) * time.Hour)
+		ctx := context.Background()
+		tasks, err := st.StaleTasks(ctx, pCut, aCut)
+		if err != nil {
+			return nil, err
+		}
+		nameByID := map[string]string{}
+		if projs, err := st.ListProjects(ctx); err == nil {
+			for _, p := range projs {
+				nameByID[p.ID] = p.Name
+			}
+		}
+		rows := make([]methods.BacklogRow, 0, len(tasks))
+		for _, t := range tasks {
+			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
+		}
+		return methods.OutliersResponse{Tasks: rows}, nil
 	}
 }
 
