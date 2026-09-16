@@ -48,6 +48,7 @@ func main() {
 		codegraphCmd(),
 		costCmd(),
 		syncCmd(),
+		constitutionCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -931,6 +932,207 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// constitutionCmd — auto-drafts constitution.md by shelling Claude
+// against the project's README/PROJECT.md + top-level structure.
+// Preview by default; --write commits to disk.
+func constitutionCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "constitution",
+		Short: "Draft/manage a project's constitution.md via Claude.",
+	}
+	cmd.AddCommand(constitutionDraftCmd())
+	return cmd
+}
+
+func constitutionDraftCmd() *cobra.Command {
+	var claudeBin, existingPath string
+	var write, force bool
+	cmd := &cobra.Command{
+		Use:   "draft [project]",
+		Short: "Ask Claude to draft a constitution.md from the project's README + structure.",
+		Long: `Reads README.md, PROJECT.md (if present), and a shallow file/dir listing
+from the project, then shells to claude -p with a scoped prompt to
+produce a constitution.md. Preview goes to stdout; --write commits
+to <project>/constitution.md (refuses to overwrite unless --force).
+
+The generated constitution is a starting point — hand-edit before
+committing. Chief treats constitution.md as user-authored input; it
+never rewrites the file on its own.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			projectSel := ""
+			if len(args) > 0 {
+				projectSel = args[0]
+			}
+			if projectSel == "" {
+				p, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				projectSel = p
+			}
+			// Resolve project → real path via chiefd (accepts id/name/path).
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var lookup methods.ProjectListResponse
+			if err := c.Call("project.list", nil, &lookup); err != nil {
+				return err
+			}
+			var projectPath, projectName string
+			for _, p := range lookup.Projects {
+				if p.ID == projectSel || p.Name == projectSel || p.Path == projectSel {
+					projectPath = p.Path
+					projectName = p.Name
+					break
+				}
+			}
+			if projectPath == "" {
+				// Not a registered project — accept a raw path as-is.
+				projectPath = projectSel
+				projectName = filepath.Base(projectSel)
+			}
+
+			// Bail if a constitution already exists + --force wasn't set.
+			target := filepath.Join(projectPath, "constitution.md")
+			if _, err := os.Stat(target); err == nil && write && !force {
+				return fmt.Errorf("%s already exists — pass --force to overwrite", target)
+			}
+
+			// Gather context: README.md, PROJECT.md (if present), + top-level tree.
+			ctx, err := gatherConstitutionContext(projectPath)
+			if err != nil {
+				return err
+			}
+			if existingPath != "" {
+				b, err := os.ReadFile(existingPath)
+				if err != nil {
+					return fmt.Errorf("read %s: %w", existingPath, err)
+				}
+				ctx += "\n\n---\n\n# Existing constitution.md (to revise):\n\n" + string(b)
+			}
+
+			bin := claudeBin
+			if bin == "" {
+				bin = "claude"
+			}
+			out, err := draftConstitutionViaClaude(bin, projectName, ctx)
+			if err != nil {
+				return fmt.Errorf("claude draft: %w", err)
+			}
+
+			if write {
+				if err := os.WriteFile(target, []byte(out), 0o644); err != nil {
+					return err
+				}
+				fmt.Printf("wrote %s (%d chars)\n", target, len(out))
+				fmt.Println("Review + edit — chief treats constitution.md as user-authored.")
+			} else {
+				fmt.Println(out)
+				fmt.Fprintln(os.Stderr, "\n(preview only — pass --write to save to "+target+")")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&claudeBin, "claude-bin", "", "override the claude binary (default: 'claude' on PATH)")
+	cmd.Flags().StringVar(&existingPath, "revise", "", "revise an existing constitution instead of drafting from scratch")
+	cmd.Flags().BoolVar(&write, "write", false, "write to <project>/constitution.md instead of stdout")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing constitution.md")
+	return cmd
+}
+
+// gatherConstitutionContext collects the small, cheap-to-read project
+// artifacts Claude will use to draft the constitution: README.md +
+// PROJECT.md (if present) + a shallow file/dir listing. Keeps the
+// prompt bounded so we don't ship the whole repo to the model.
+func gatherConstitutionContext(projectPath string) (string, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Project: %s\n\n", filepath.Base(projectPath))
+	for _, name := range []string{"README.md", "PROJECT.md", "CONTRIBUTING.md"} {
+		p := filepath.Join(projectPath, name)
+		if content, err := os.ReadFile(p); err == nil {
+			// Clamp to ~30KB per file so a giant README doesn't blow the
+			// prompt budget.
+			if len(content) > 30_000 {
+				content = append(content[:30_000], []byte("\n\n… (truncated)")...)
+			}
+			fmt.Fprintf(&b, "## %s\n\n%s\n\n", name, string(content))
+		}
+	}
+	// Top-level listing (2 levels deep, skipping the usual noise).
+	fmt.Fprintln(&b, "## Top-level structure\n")
+	entries, err := os.ReadDir(projectPath)
+	if err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, ".") || name == "node_modules" ||
+				name == "target" || name == "build" || name == "dist" {
+				continue
+			}
+			if e.IsDir() {
+				fmt.Fprintf(&b, "- %s/\n", name)
+				subs, _ := os.ReadDir(filepath.Join(projectPath, name))
+				count := 0
+				for _, s := range subs {
+					if strings.HasPrefix(s.Name(), ".") {
+						continue
+					}
+					marker := ""
+					if s.IsDir() {
+						marker = "/"
+					}
+					fmt.Fprintf(&b, "  - %s%s\n", s.Name(), marker)
+					count++
+					if count >= 15 {
+						fmt.Fprintln(&b, "  - …")
+						break
+					}
+				}
+			} else {
+				fmt.Fprintf(&b, "- %s\n", name)
+			}
+		}
+	}
+	return b.String(), nil
+}
+
+// draftConstitutionViaClaude shells `claude -p '<prompt>'`. Prompt is
+// scoped: hand Claude the project context, tell it what a constitution
+// should contain, ask for markdown-only output.
+func draftConstitutionViaClaude(bin, projectName, projectCtx string) (string, error) {
+	prompt := "You are drafting a `constitution.md` for a software project. A " +
+		"constitution is a short, human-authored charter that captures:\n\n" +
+		"  - **Purpose:** what this project exists to do (one paragraph)\n" +
+		"  - **Non-goals:** what this project explicitly does NOT do\n" +
+		"  - **Design principles:** the 3-5 non-obvious rules that shape " +
+		"decisions (e.g. \"always prefer editing the canonical file over " +
+		"generating a shadow copy\", \"markdown is the source of truth, " +
+		"SQLite is an index\")\n" +
+		"  - **Conventions:** language + tooling choices, naming, layout\n" +
+		"  - **Change philosophy:** how big changes are proposed / reviewed\n\n" +
+		"Rules:\n" +
+		"- Output markdown only. No prose before or after. No fences around " +
+		"the whole thing.\n" +
+		"- Keep it short (target 60-120 lines). This is a charter, not a manual.\n" +
+		"- Be specific — infer principles from the actual code + docs. " +
+		"Generic advice (\"write tests\", \"use meaningful names\") is worthless.\n" +
+		"- Where you're unsure, mark it: `**TODO(human):** decision needed on X`.\n\n" +
+		"Project context follows:\n\n---\n\n" + projectCtx + "\n\n---\n\n" +
+		"Now draft constitution.md."
+
+	cmd := exec.Command(bin, "-p", prompt)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("%s -p: %w (stderr: %s)", bin, err, string(ee.Stderr))
+		}
+		return "", err
+	}
+	return stripFences(strings.TrimSpace(string(out))), nil
 }
 
 // syncCmd fronts the git-based machine-sync flow. push commits +

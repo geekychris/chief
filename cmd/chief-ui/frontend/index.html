@@ -145,6 +145,28 @@
     </aside>
   </main>
 
+  <!-- Modal: add-project (Wails webview drops window.prompt(), so use a real modal) -->
+  <div id="modal-add-project" class="modal hidden">
+    <div class="modal-card">
+      <h2>Add project</h2>
+      <p class="modal-hint">Absolute path to a project directory. Chief creates <code>.chief/</code> inside it + starts watching backlog.md.</p>
+      <div class="modal-row"><label>Path</label><input id="add-project-path" type="text" placeholder="/Users/…/my-project"/></div>
+      <div class="modal-row"><label>Name</label><input id="add-project-name" type="text" placeholder="(optional; default: directory basename)"/></div>
+      <div class="modal-row"><label>Spawn mode</label>
+        <select id="add-project-spawn">
+          <option value="">attach (default)</option>
+          <option value="headless">headless</option>
+          <option value="spawn-interactive">spawn-interactive</option>
+        </select>
+      </div>
+      <div id="add-project-error" class="modal-hint" style="color: var(--bad); display: none;"></div>
+      <div class="modal-actions">
+        <button id="btn-add-project-cancel">Cancel</button>
+        <button id="btn-add-project-save" class="primary">Add project</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: add-task -->
   <div id="modal-add" class="modal hidden">
     <div class="modal-card">

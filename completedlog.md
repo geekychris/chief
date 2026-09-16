@@ -1,5 +1,9 @@
 # Completed
 
+- [x] {id:40fd} what other features? [category:Backlog] (done 2026-09-16 06:30:46)
+- [x] {id:53b0} add project does not do anything [category:Backlog] (done 2026-09-16 06:30:46)
+- [x] {id:00a7} auto create constitution [category:Backlog] (done 2026-09-16 06:30:46)
+- [x] {id:1231} code_graph_search: port cross-file resolution fix to Rust + Java parsers [category:Backlog] (done 2026-09-16 06:26:34)
 - [x] {id:d00a} Sync between machines [category:Agentic ergonomics] (done 2026-09-16 05:10:39)
 - [x] {id:ce12} Per-project token / cost tracking [category:Multi-project coordination] (done 2026-09-16 05:05:36)
 - [x] {id:f06a} add support for code graph search [category:Backlog] (done 2026-09-16 04:49:55)

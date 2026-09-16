@@ -55,6 +55,14 @@ const els = {
   btnDeleteTask: $('btn-delete-task'),
   btnSendSelected: $('btn-send-selected'),
   selectAll: $('select-all'),
+  // Modal: add-project
+  modalAddProject: $('modal-add-project'),
+  addProjectPath: $('add-project-path'),
+  addProjectName: $('add-project-name'),
+  addProjectSpawn: $('add-project-spawn'),
+  addProjectError: $('add-project-error'),
+  btnAddProjectSave: $('btn-add-project-save'),
+  btnAddProjectCancel: $('btn-add-project-cancel'),
   // Modal: add-task
   modalAdd: $('modal-add'),
   addTitle: $('add-title'),
@@ -126,7 +134,9 @@ let currentSessions = null;
 // -------- wiring --------
 
 els.btnRefresh.addEventListener('click', refreshAll);
-els.btnAdd.addEventListener('click', addProject);
+els.btnAdd.addEventListener('click', openAddProjectModal);
+els.btnAddProjectCancel.addEventListener('click', () => els.modalAddProject.classList.add('hidden'));
+els.btnAddProjectSave.addEventListener('click', submitAddProject);
 els.btnAddTask.addEventListener('click', openAddTaskModal);
 els.statusFilter.addEventListener('change', (e) => {
   state.statusFilter = e.target.value;
@@ -922,15 +932,46 @@ function relativeTime(iso) {
   return Math.floor(s / 86400) + 'd ago';
 }
 
-async function addProject() {
-  const path = prompt('Path to project directory (absolute):');
-  if (!path) return;
+function openAddProjectModal() {
+  els.addProjectPath.value = '';
+  els.addProjectName.value = '';
+  els.addProjectSpawn.value = '';
+  els.addProjectError.style.display = 'none';
+  els.addProjectError.textContent = '';
+  els.modalAddProject.classList.remove('hidden');
+  // Focus the path field for immediate typing.
+  setTimeout(() => els.addProjectPath.focus(), 50);
+}
+
+async function submitAddProject() {
+  const path = (els.addProjectPath.value || '').trim();
+  const name = (els.addProjectName.value || '').trim();
+  const spawn = els.addProjectSpawn.value || '';
+  if (!path) {
+    els.addProjectError.textContent = 'Path is required.';
+    els.addProjectError.style.display = 'block';
+    return;
+  }
+  els.addProjectError.style.display = 'none';
+  els.btnAddProjectSave.disabled = true;
+  els.btnAddProjectSave.textContent = 'Adding…';
   try {
-    const resp = await AddProject(path.trim(), '', '');
-    console.log('added', resp);
+    const resp = await AddProject(path, name, spawn);
+    els.modalAddProject.classList.add('hidden');
+    showToast(`Added ${resp.project.name} — imported ${resp.tasks_imported} task(s)`);
     await refreshAll();
+    // Select the newly-added project so the user immediately sees its backlog.
+    if (resp.project && resp.project.id) {
+      await selectProject(resp.project.id);
+    }
   } catch (e) {
-    alert('Add project failed: ' + (e.message || e));
+    const msg = String(e && e.message || e);
+    els.addProjectError.textContent = 'Add failed: ' + msg;
+    els.addProjectError.style.display = 'block';
+    showToast('Add project failed: ' + msg, true);
+  } finally {
+    els.btnAddProjectSave.disabled = false;
+    els.btnAddProjectSave.textContent = 'Add project';
   }
 }
 
