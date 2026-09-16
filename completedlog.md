@@ -1,5 +1,10 @@
 # Completed
 
+- [x] {id:535c} Per-project + global Do-Not-Disturb schedule [category:Attention & notifications] (done 2026-09-16 03:56)
+- [x] {id:19f8} Log every daemon operation to the SQLite `events` table with structured JSON payload [priority:5] [category:Operations logging & analytics] (done 2026-09-16 03:56)
+- [x] {id:2546} Retention policy for the events table [category:Operations logging & analytics] (done 2026-09-16 03:56)
+- [x] {id:f7de} `chief stats` CLI subcommand for terminal-friendly analytics [category:Operations logging & analytics] (done 2026-09-16 03:56)
+- [x] {id:c09c} Cross-project full-text search across all backlogs [category:Multi-project coordination] (done 2026-09-16 03:56)
 - [x] {id:e0f5} Menu-bar counter of pending attention items across all projects [category:Attention & notifications] (done 2026-09-16 03:44)
 - [x] {id:02a6} Unified "next up" queue across all projects [priority:5] [category:Multi-project coordination] (done 2026-09-16 03:44)
 - [x] {id:1241} Idle-session detection + auto-recovery [category:Multi-project coordination] (done 2026-09-16 03:39)

@@ -37,6 +37,7 @@ type ProjectFile struct {
 	SpawnMode string   `yaml:"spawn_mode"` // attach|headless|spawn-interactive
 	Cmux      CmuxBind `yaml:"cmux"`
 	Idle      IdleCfg  `yaml:"idle,omitempty"`
+	DND       DNDCfg   `yaml:"dnd,omitempty"`
 }
 
 // IdleCfg tunes the idle-session sweeper on a per-project basis. Zero
@@ -47,6 +48,17 @@ type IdleCfg struct {
 	TimeoutMinutes int `yaml:"timeout_minutes,omitempty"`
 	// Disable turns off the sweeper for this project entirely.
 	Disable bool `yaml:"disable,omitempty"`
+}
+
+// DNDCfg is the per-project DND override. Same shape as the global
+// DNDConfig in internal/config. Any set field overrides global; unset
+// fields inherit. Set Disable=true to opt this project out of any DND
+// (notifications always fire).
+type DNDCfg struct {
+	Start    string `yaml:"start,omitempty"`
+	End      string `yaml:"end,omitempty"`
+	Weekdays []int  `yaml:"weekdays,omitempty"`
+	Disable  bool   `yaml:"disable,omitempty"`
 }
 
 // CmuxBind records the cmux workspace/surface this project is associated with.
@@ -606,6 +618,17 @@ func (m *Manager) Rescan(ctx context.Context, projectID string) ([]backlog.Task,
 	}
 	if err := m.Store.UpsertTasks(ctx, proj.ID, storeTasks); err != nil {
 		return nil, err
+	}
+
+	// Structured event so downstream stats (task velocity, activity) can
+	// count sweeps + completions. Only emit when something interesting
+	// changed to avoid spamming events on empty rescans.
+	if len(doneIDs) > 0 || len(idEdits) > 0 {
+		_ = m.Store.InsertEvent(ctx, proj.ID, "", "rescan.completed", map[string]any{
+			"tasks_total":    len(storeTasks),
+			"tasks_swept":    len(doneIDs),
+			"ids_minted":     len(idEdits),
+		})
 	}
 
 	// Next-task suggestion. Fires when a task genuinely transitioned from

@@ -71,6 +71,60 @@ type BacklogRow struct {
 	ProjectName string `json:"project_name"`
 }
 
+// ---------- search ----------
+
+type SearchRequest struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"` // 0 → 100
+}
+type SearchResponse struct {
+	Tasks []BacklogRow `json:"tasks"`
+}
+
+// ---------- stats.summary ----------
+
+// StatsSummaryRequest — accepts a window (rolling in days, default 7)
+// so the CLI can ask "how much did I get done this week vs last month".
+type StatsSummaryRequest struct {
+	WindowDays int `json:"window_days,omitempty"`
+}
+
+// StatsSummaryResponse — per-project rollups + a global summary. The
+// wire shape is UI-agnostic; both the CLI table renderer and a future
+// dashboard consume the same payload.
+type StatsSummaryResponse struct {
+	WindowDays int              `json:"window_days"`
+	Global     StatsGlobal      `json:"global"`
+	Projects   []StatsPerProject `json:"projects"`
+}
+
+type StatsGlobal struct {
+	Projects       int    `json:"projects"`
+	TasksPending   int    `json:"tasks_pending"`
+	TasksActive    int    `json:"tasks_active"`
+	TasksDeferred  int    `json:"tasks_deferred"`
+	TasksBlocked   int    `json:"tasks_blocked"`
+	TasksDone      int    `json:"tasks_done"`
+	FlagsOpen      int    `json:"flags_open"`
+	CompletedWindow int   `json:"completed_window"` // task.added→done events in window; proxy = rescan.completed events with tasks_swept>0
+	EventsTotal    int64  `json:"events_total"`
+}
+
+type StatsPerProject struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Path           string `json:"path"`
+	State          string `json:"state"`
+	Pending        int    `json:"pending"`
+	Active         int    `json:"active"`
+	Deferred       int    `json:"deferred"`
+	Blocked        int    `json:"blocked"`
+	Done           int    `json:"done"`
+	FlagsOpen      int    `json:"flags_open"`
+	LastActivity   string `json:"last_activity,omitempty"` // RFC3339; empty = never
+	CompletedWindow int   `json:"completed_window"`
+}
+
 // ---------- backlog.next ----------
 
 // BacklogNextRequest asks for the top-N pending tasks system-wide, ranked
@@ -351,6 +405,7 @@ type FlagRaiseResponse struct {
 	NotifiedMacOS  bool    `json:"notified_macos"`
 	RateLimited    bool    `json:"rate_limited"`
 	SnoozedProject bool    `json:"snoozed_project"`
+	InDND          bool    `json:"in_dnd"`
 }
 
 // FlagRow is the wire form of store.Flag, joined with the project name so

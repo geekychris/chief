@@ -21,6 +21,37 @@ const Filename = "config.yaml"
 type Config struct {
 	// Cmux authentication + optional overrides for cmux socket location.
 	Cmux CmuxConfig `yaml:"cmux"`
+	// Events retention + archival.
+	Events EventsConfig `yaml:"events,omitempty"`
+	// DND (do-not-disturb) — suppresses macOS notifications during
+	// configured windows. Flags still land in the inbox + menu-bar
+	// count; only the noisy channel is muted.
+	DND DNDConfig `yaml:"dnd,omitempty"`
+}
+
+// DNDConfig is the global DND window. Per-project overrides live in
+// .chief/project.yaml under `dnd:`.
+//
+// Times are "HH:MM" in local time (24h). Windows may wrap midnight
+// ("22:00" → "07:00" = 9 hours of quiet). Empty start/end disables.
+type DNDConfig struct {
+	Start string `yaml:"start,omitempty"` // e.g. "22:00"
+	End   string `yaml:"end,omitempty"`   // e.g. "07:00"
+	// Weekdays: if set, DND only applies on these days (0=Sunday..6=Saturday).
+	// Empty means every day.
+	Weekdays []int `yaml:"weekdays,omitempty"`
+}
+
+// EventsConfig tunes the events-table retention worker.
+type EventsConfig struct {
+	// RetentionDays: events older than this get archived to
+	// ~/Library/Logs/Chief/archive/YYYY-MM.jsonl.gz then deleted from
+	// SQLite. 0 uses the default (90). Set to a negative value to
+	// disable archival entirely (rows never expire).
+	RetentionDays int `yaml:"retention_days,omitempty"`
+	// SweepEvery is how often the retention worker runs. 0 uses 24h.
+	// Kept mostly for tests; production defaults are fine.
+	SweepEveryHours int `yaml:"sweep_every_hours,omitempty"`
 }
 
 // CmuxConfig is the cmux-side of Chief config.

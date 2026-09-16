@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"crypto/rand"
@@ -412,6 +413,57 @@ func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 	return out, rows.Err()
 }
 
+// SearchTasks returns tasks whose title, body, or category matches the
+// query (case-insensitive substring). Includes done/dropped by default
+// so history is searchable; caller filters via TaskFilter after.
+//
+// Ranking: title match > category match > body match; ties broken by
+// (status='done' last, priority DESC, source_line ASC). Limit 0 = 100.
+//
+// LIKE (not FTS5) so we don't need an extra virtual-table migration.
+// Chief's task counts are in the low hundreds; LIKE with the tasks
+// table's existing indexes is fine here.
+func (s *Store) SearchTasks(ctx context.Context, query string, limit int) ([]Task, error) {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	like := "%" + strings.ToLower(q) + "%"
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, title, body, source_file, source_line_hash,
+		       source_line, status, priority, category, required_resources, due,
+		       claimed_at, claimed_by_session, revive_count,
+		       created_at, completed_at
+		  FROM tasks
+		 WHERE LOWER(title) LIKE ? OR LOWER(body) LIKE ? OR LOWER(category) LIKE ?
+		 ORDER BY
+		   CASE WHEN LOWER(title) LIKE ? THEN 0
+		        WHEN LOWER(category) LIKE ? THEN 1
+		        ELSE 2 END ASC,
+		   (status = 'done') ASC,
+		   priority DESC,
+		   source_line ASC
+		 LIMIT ?`,
+		like, like, like, like, like, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // NextPending returns the top-N pending tasks across ALL projects ranked
 // by (priority DESC, source_line ASC, created_at ASC). This powers the
 // "which project should I focus on right now" view — the CLI subcommand
@@ -544,6 +596,148 @@ func (s *Store) InsertEvent(ctx context.Context, projectID, sessionID, kind stri
 		time.Now().UTC().Format(time.RFC3339Nano), pid, sid, kind, string(raw),
 	)
 	return err
+}
+
+// Event is one row in the audit log — the wire form used by the archive
+// writer + `chief events` CLI (which lands in follow-on work).
+type Event struct {
+	ID        int64     `json:"id"`
+	Ts        time.Time `json:"ts"`
+	ProjectID string    `json:"project_id,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
+	Kind      string    `json:"kind"`
+	Payload   string    `json:"payload"` // raw JSON string; caller parses if needed
+}
+
+// EventsOlderThan returns events with ts < cutoff, ordered by ts ASC.
+// Bounded by limit to avoid unbounded memory pressure on huge tables;
+// callers loop until the returned slice is short.
+func (s *Store) EventsOlderThan(ctx context.Context, cutoff time.Time, limit int) ([]Event, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, ts, project_id, session_id, kind, payload
+		  FROM events
+		 WHERE ts < ?
+		 ORDER BY ts ASC
+		 LIMIT ?`,
+		cutoff.UTC().Format(time.RFC3339Nano), limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Event
+	for rows.Next() {
+		var e Event
+		var ts string
+		var pid, sid sql.NullString
+		if err := rows.Scan(&e.ID, &ts, &pid, &sid, &e.Kind, &e.Payload); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			e.Ts = t
+		} else if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			e.Ts = t
+		}
+		if pid.Valid {
+			e.ProjectID = pid.String
+		}
+		if sid.Valid {
+			e.SessionID = sid.String
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// DeleteEventsByIDs removes the given event rows in one transaction.
+// The retention worker only calls this after the archive write succeeds,
+// so a crash between archive and delete just re-archives (idempotent
+// filenames + append semantics make that safe).
+func (s *Store) DeleteEventsByIDs(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `DELETE FROM events WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, id := range ids {
+		if _, err := stmt.ExecContext(ctx, id); err != nil {
+			return fmt.Errorf("delete event %d: %w", id, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// CountEvents returns the current row count. Cheap enough for the stats
+// CLI to include as a top-line number.
+func (s *Store) CountEvents(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&n)
+	return n, err
+}
+
+// LastEventPerProject returns the max(ts) per project as a map[project_id]time.
+// Powers "last activity" on the stats view.
+func (s *Store) LastEventPerProject(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT project_id, MAX(ts) FROM events
+		 WHERE project_id IS NOT NULL AND project_id != ''
+		 GROUP BY project_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var pid, ts string
+		if err := rows.Scan(&pid, &ts); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			out[pid] = t
+		} else if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			out[pid] = t
+		}
+	}
+	return out, rows.Err()
+}
+
+// CountEventsByKindSince returns how many events of each kind fired
+// since t, for optional per-project scoping. Powers "recent completions"
+// and other velocity numbers on the stats view.
+func (s *Store) CountEventsByKindSince(ctx context.Context, projectID string, since time.Time) (map[string]int64, error) {
+	q := `SELECT kind, COUNT(*) FROM events WHERE ts >= ?`
+	args := []any{since.UTC().Format(time.RFC3339Nano)}
+	if projectID != "" {
+		q += " AND project_id = ?"
+		args = append(args, projectID)
+	}
+	q += " GROUP BY kind"
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var kind string
+		var n int64
+		if err := rows.Scan(&kind, &n); err != nil {
+			return nil, err
+		}
+		out[kind] = n
+	}
+	return out, rows.Err()
 }
 
 // ---------- Flags DAO ----------

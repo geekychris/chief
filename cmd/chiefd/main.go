@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/geekychris/chief/internal/archive"
 	"github.com/geekychris/chief/internal/attention"
 	"github.com/geekychris/chief/internal/claudetrace"
 	"github.com/geekychris/chief/internal/cmux"
@@ -90,6 +91,26 @@ func run() error {
 	att := &attention.Manager{
 		Store:    st,
 		Notifier: notify.New(),
+	}
+	// DND resolver: per-project override wins over global. A project
+	// with dnd.disable=true always fires (opts out of global quiet hours).
+	att.DNDWindowFor = func(projectID string) attention.DNDWindow {
+		pf, err := mgr.ReadYAML(context.Background(), projectID)
+		if err == nil && pf.DND.Disable {
+			return attention.DNDWindow{Disable: true}
+		}
+		if err == nil && (pf.DND.Start != "" || pf.DND.End != "" || len(pf.DND.Weekdays) > 0) {
+			return attention.DNDWindow{
+				Start:    pf.DND.Start,
+				End:      pf.DND.End,
+				Weekdays: pf.DND.Weekdays,
+			}
+		}
+		return attention.DNDWindow{
+			Start:    cfg.DND.Start,
+			End:      cfg.DND.End,
+			Weekdays: cfg.DND.Weekdays,
+		}
 	}
 	mgr.Attention = att
 
@@ -169,6 +190,25 @@ func run() error {
 		sweeper.Run(ctx)
 	}()
 
+	// Events retention sweeper: archives events older than the
+	// configured window (default 90 days) to gzipped JSONL and deletes
+	// them from SQLite. Set config.Events.RetentionDays < 0 to disable.
+	logDir, _ := ipc.LogDir()
+	archiveDir := filepath.Join(logDir, "archive")
+	retention := &orchestrator.RetentionSweeper{
+		Store:         st,
+		Archive:       archive.New(archiveDir),
+		RetentionDays: cfg.Events.RetentionDays,
+	}
+	if cfg.Events.SweepEveryHours > 0 {
+		retention.Interval = time.Duration(cfg.Events.SweepEveryHours) * time.Hour
+	}
+	retentionDone := make(chan struct{})
+	go func() {
+		defer close(retentionDone)
+		retention.Run(ctx)
+	}()
+
 	srv := ipc.NewServer()
 	registerMethods(srv, st, mgr, watcher, att, cfg)
 
@@ -204,6 +244,7 @@ func run() error {
 	<-acceptDone
 	<-watchDone
 	<-sweepDone
+	<-retentionDone
 
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
@@ -261,6 +302,8 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("project.rescan", handleProjectRescan(mgr))
 	s.Register("backlog.list", handleBacklogList(st))
 	s.Register("backlog.next", handleBacklogNext(st))
+	s.Register("stats.summary", handleStatsSummary(st))
+	s.Register("search", handleSearch(st))
 	s.Register("task.show", handleTaskShow(st))
 	s.Register("task.add", handleTaskAdd(mgr))
 	s.Register("task.update", handleTaskUpdate(mgr))
@@ -344,6 +387,7 @@ func handleFlagRaise(st *store.Store, att *attention.Manager) ipc.Handler {
 			NotifiedMacOS:  res.NotifiedMacOS,
 			RateLimited:    res.RateLimited,
 			SnoozedProject: res.SnoozedProject,
+			InDND:          res.InDND,
 		}, nil
 	}
 }
@@ -1027,6 +1071,10 @@ func handleTaskAdd(mgr *project.Manager) ipc.Handler {
 		if err != nil {
 			return nil, err
 		}
+		_ = mgr.Store.InsertEvent(context.Background(), p.ID, "", "task.added", map[string]any{
+			"task_id": t.ID, "title": t.Title, "priority": t.Priority,
+			"category": t.Category, "outcome": "ok",
+		})
 		return methods.TaskAddResponse{Task: t}, nil
 	}
 }
@@ -1052,6 +1100,10 @@ func handleTaskUpdate(mgr *project.Manager) ipc.Handler {
 		if err != nil {
 			return nil, err
 		}
+		_ = mgr.Store.InsertEvent(context.Background(), t.ProjectID, "", "task.updated", map[string]any{
+			"task_id": t.ID, "title": t.Title, "priority": t.Priority,
+			"category": t.Category, "outcome": "ok",
+		})
 		return methods.TaskUpdateResponse{Task: t}, nil
 	}
 }
@@ -1074,6 +1126,12 @@ func handleTaskReorder(mgr *project.Manager) ipc.Handler {
 			return nil, err
 		}
 		applied := before.SourceLine != after.SourceLine
+		_ = mgr.Store.InsertEvent(context.Background(), after.ProjectID, "", "task.reordered", map[string]any{
+			"task_id":   after.ID,
+			"direction": req.Direction,
+			"applied":   applied,
+			"outcome":   "ok",
+		})
 		return methods.TaskReorderResponse{Task: after, Applied: applied}, nil
 	}
 }
@@ -1087,9 +1145,14 @@ func handleTaskDelete(mgr *project.Manager) ipc.Handler {
 		if req.TaskID == "" {
 			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "task_id required"}
 		}
+		// Look up before delete so we can log the project/title.
+		before, _ := mgr.Store.GetTask(context.Background(), req.TaskID)
 		if err := mgr.DeleteTask(context.Background(), req.TaskID); err != nil {
 			return nil, err
 		}
+		_ = mgr.Store.InsertEvent(context.Background(), before.ProjectID, "", "task.deleted", map[string]any{
+			"task_id": before.ID, "title": before.Title, "outcome": "ok",
+		})
 		return methods.TaskDeleteResponse{Deleted: true}, nil
 	}
 }
@@ -1116,6 +1179,7 @@ func handlePing(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
 
 func handleProjectAdd(st *store.Store, mgr *project.Manager, w *fswatch.Watcher) ipc.Handler {
 	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		start := time.Now()
 		var req methods.ProjectAddRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
@@ -1137,6 +1201,12 @@ func handleProjectAdd(st *store.Store, mgr *project.Manager, w *fswatch.Watcher)
 		if err != nil {
 			return nil, err
 		}
+		_ = st.InsertEvent(context.Background(), p.ID, "", "project.added", map[string]any{
+			"path": p.Path, "name": p.Name, "spawn_mode": p.SpawnMode,
+			"tasks_imported": len(tasks),
+			"duration_ms":    time.Since(start).Milliseconds(),
+			"outcome":        "ok",
+		})
 		return methods.ProjectAddResponse{Project: p, TasksImported: len(tasks)}, nil
 	}
 }
@@ -1177,6 +1247,7 @@ func handleProjectList(st *store.Store) ipc.Handler {
 
 func handleProjectRemove(mgr *project.Manager, w *fswatch.Watcher) ipc.Handler {
 	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		start := time.Now()
 		var req methods.ProjectRemoveRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
@@ -1192,6 +1263,11 @@ func handleProjectRemove(mgr *project.Manager, w *fswatch.Watcher) ipc.Handler {
 			return nil, err
 		}
 		w.Remove(p.ID)
+		_ = mgr.Store.InsertEvent(context.Background(), p.ID, "", "project.removed", map[string]any{
+			"path": p.Path, "name": p.Name,
+			"duration_ms": time.Since(start).Milliseconds(),
+			"outcome":     "ok",
+		})
 		return methods.ProjectRemoveResponse{Removed: true}, nil
 	}
 }
@@ -1200,6 +1276,7 @@ func handleProjectRemove(mgr *project.Manager, w *fswatch.Watcher) ipc.Handler {
 
 func handleProjectRescan(mgr *project.Manager) ipc.Handler {
 	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		start := time.Now()
 		var req methods.ProjectRescanRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
@@ -1212,6 +1289,12 @@ func handleProjectRescan(mgr *project.Manager) ipc.Handler {
 		if err != nil {
 			return nil, err
 		}
+		_ = mgr.Store.InsertEvent(context.Background(), p.ID, "", "project.rescanned", map[string]any{
+			"tasks":       len(tasks),
+			"trigger":     "cli",
+			"duration_ms": time.Since(start).Milliseconds(),
+			"outcome":     "ok",
+		})
 		return methods.ProjectRescanResponse{Tasks: len(tasks)}, nil
 	}
 }
@@ -1291,6 +1374,108 @@ func handleBacklogNext(st *store.Store) ipc.Handler {
 			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
 		}
 		return methods.BacklogNextResponse{Tasks: rows}, nil
+	}
+}
+
+// ---------- search ----------
+
+func handleSearch(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.SearchRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.Query == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "query required"}
+		}
+		ctx := context.Background()
+		tasks, err := st.SearchTasks(ctx, req.Query, req.Limit)
+		if err != nil {
+			return nil, err
+		}
+		nameByID := map[string]string{}
+		if projs, err := st.ListProjects(ctx); err == nil {
+			for _, p := range projs {
+				nameByID[p.ID] = p.Name
+			}
+		}
+		rows := make([]methods.BacklogRow, 0, len(tasks))
+		for _, t := range tasks {
+			rows = append(rows, methods.BacklogRow{Task: t, ProjectName: nameByID[t.ProjectID]})
+		}
+		return methods.SearchResponse{Tasks: rows}, nil
+	}
+}
+
+// ---------- stats.summary ----------
+
+func handleStatsSummary(st *store.Store) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.StatsSummaryRequest
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &req)
+		}
+		window := req.WindowDays
+		if window <= 0 {
+			window = 7
+		}
+		ctx := context.Background()
+		projs, err := st.ListProjects(ctx)
+		if err != nil {
+			return nil, err
+		}
+		since := time.Now().UTC().Add(-time.Duration(window) * 24 * time.Hour)
+		lastEvent, _ := st.LastEventPerProject(ctx)
+		globalRecent, _ := st.CountEventsByKindSince(ctx, "", since)
+		totalEvents, _ := st.CountEvents(ctx)
+
+		resp := methods.StatsSummaryResponse{
+			WindowDays: window,
+			Global: methods.StatsGlobal{
+				Projects:        len(projs),
+				CompletedWindow: int(globalRecent["rescan.completed"]),
+				EventsTotal:     totalEvents,
+			},
+		}
+		for _, p := range projs {
+			row := methods.StatsPerProject{
+				ID: p.ID, Name: p.Name, Path: p.Path, State: p.State,
+			}
+			tasks, err := st.ListTasks(ctx, store.TaskFilter{ProjectID: p.ID})
+			if err == nil {
+				for _, t := range tasks {
+					switch t.Status {
+					case store.TaskPending:
+						row.Pending++
+					case store.TaskActive:
+						row.Active++
+					case store.TaskDeferred:
+						row.Deferred++
+					case store.TaskBlocked:
+						row.Blocked++
+					case store.TaskDone:
+						row.Done++
+					}
+				}
+			}
+			if n, err := st.CountOpenFlags(ctx, p.ID); err == nil {
+				row.FlagsOpen = n
+			}
+			if t, ok := lastEvent[p.ID]; ok {
+				row.LastActivity = t.Format(time.RFC3339)
+			}
+			perProjRecent, _ := st.CountEventsByKindSince(ctx, p.ID, since)
+			row.CompletedWindow = int(perProjRecent["rescan.completed"])
+
+			resp.Global.TasksPending += row.Pending
+			resp.Global.TasksActive += row.Active
+			resp.Global.TasksDeferred += row.Deferred
+			resp.Global.TasksBlocked += row.Blocked
+			resp.Global.TasksDone += row.Done
+			resp.Global.FlagsOpen += row.FlagsOpen
+			resp.Projects = append(resp.Projects, row)
+		}
+		return resp, nil
 	}
 }
 

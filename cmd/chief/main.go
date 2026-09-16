@@ -40,6 +40,8 @@ func main() {
 		inboxCmd(),
 		answerCmd(),
 		nextCmd(),
+		statsCmd(),
+		searchCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -754,6 +756,122 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
+func searchCmd() *cobra.Command {
+	var limit int
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "search <query...>",
+		Short: "Search tasks across ALL projects (case-insensitive, LIKE-based).",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			query := strings.Join(args, " ")
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.SearchResponse
+			if err := c.Call("search", methods.SearchRequest{Query: query, Limit: limit}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			if len(resp.Tasks) == 0 {
+				fmt.Printf("no matches for %q\n", query)
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "STATUS\tID\tPRIO\tPROJECT\tCATEGORY\tTITLE")
+			for _, r := range resp.Tasks {
+				glyph := statusGlyph(string(r.Status))
+				title := r.Title
+				if len(title) > 60 {
+					title = title[:57] + "..."
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
+					glyph, r.ID, r.Priority, r.ProjectName, r.Category, title)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().IntVar(&limit, "limit", 50, "max results")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
+}
+
+// statsCmd renders a per-project + global rollup useful for the daily
+// glance ("how much did I get done, what needs attention, which
+// project's been quiet"). Also the data source for the future daily
+// digest (218b) once messaging backends land.
+func statsCmd() *cobra.Command {
+	var window int
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Cross-project rollup: task counts, open flags, last activity, velocity.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.StatsSummaryResponse
+			if err := c.Call("stats.summary", methods.StatsSummaryRequest{WindowDays: window}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			g := resp.Global
+			fmt.Printf("Chief · %d project(s) · %d events total · window %d day(s)\n",
+				g.Projects, g.EventsTotal, resp.WindowDays)
+			fmt.Printf("  Tasks: %d pending · %d active · %d blocked · %d deferred · %d done\n",
+				g.TasksPending, g.TasksActive, g.TasksBlocked, g.TasksDeferred, g.TasksDone)
+			fmt.Printf("  Attention: %d open flag(s) · %d completion sweep(s) in window\n\n",
+				g.FlagsOpen, g.CompletedWindow)
+			if len(resp.Projects) == 0 {
+				fmt.Println("no projects registered")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tSTATE\tPEND\tACT\tBLK\tDEF\tDONE\tFLAGS\tSWEEPS/W\tLAST ACTIVITY")
+			for _, p := range resp.Projects {
+				last := "—"
+				if p.LastActivity != "" {
+					if t, err := time.Parse(time.RFC3339, p.LastActivity); err == nil {
+						last = relativeTime(time.Since(t))
+					}
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n",
+					p.Name, p.State, p.Pending, p.Active, p.Blocked, p.Deferred, p.Done,
+					p.FlagsOpen, p.CompletedWindow, last)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().IntVar(&window, "window", 7, "rolling window in days for velocity numbers")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON result")
+	return cmd
+}
+
+// relativeTime formats a duration ago as "3h", "2d", "just now".
+func relativeTime(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
 // ---------- flag / inbox / answer / next ----------
 //
 // The attention pipeline. `chief flag` is what a Claude session (or a human)
@@ -805,6 +923,8 @@ func flagCmd() *cobra.Command {
 			switch {
 			case resp.SnoozedProject:
 				hint = " (snoozed — no notification)"
+			case resp.InDND:
+				hint = " (in DND window — no notification)"
 			case resp.RateLimited:
 				hint = " (rate-limited — no notification)"
 			case resp.Coalesced:

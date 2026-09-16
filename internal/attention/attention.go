@@ -46,6 +46,12 @@ type Manager struct {
 	RateWindow time.Duration
 	AggWindow  time.Duration
 
+	// DNDWindowFor returns the resolved DND schedule for a project. If
+	// nil, no DND is applied. Wired at chiefd boot from global config
+	// + per-project overrides; kept as a callback so this package
+	// doesn't need to import config/project (avoids an import cycle).
+	DNDWindowFor func(projectID string) DNDWindow
+
 	// snoozeUntil tracks per-project "hold notifications" cursors set via
 	// Snooze(). Reset on chiefd restart, which is fine — snoozes are
 	// meant to be short (minutes to hours). Not persisted to avoid a
@@ -73,6 +79,7 @@ type RaiseResult struct {
 	NotifiedMacOS  bool
 	RateLimited    bool // flag stored, notification skipped
 	SnoozedProject bool // project is currently snoozed; notification skipped
+	InDND          bool // scheduled DND window suppressed the notification
 }
 
 // Raise records a new attention flag. It:
@@ -142,6 +149,16 @@ func (m *Manager) notify(ctx context.Context, f store.Flag, coalesced bool, opts
 	if until, ok := m.snoozedUntil(opts.ProjectID); ok && now.Before(until) {
 		res.SnoozedProject = true
 		return res, nil
+	}
+	// DND check: scheduled quiet-hours window. Flag row is already
+	// persisted so it shows in the inbox and badge count — we just
+	// don't fire the OS notification. `now` here is UTC (via m.now());
+	// convert to local time to compare against user's HH:MM window.
+	if m.DNDWindowFor != nil {
+		if w := m.DNDWindowFor(opts.ProjectID); w.InWindow(now.Local()) {
+			res.InDND = true
+			return res, nil
+		}
 	}
 	// Rate limit: count flags in this project within the window.
 	count, err := m.Store.CountOpenFlagsSince(ctx, opts.ProjectID, now.Add(-m.rateWindow()))

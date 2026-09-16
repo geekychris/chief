@@ -1,18 +1,13 @@
 ## Backlog
+- [ ] {id:1c88} For completed work I want the timestamp when it was reported
+- [ ] {id:f06a} add support for code graph search
+  ensure that we can install https://github.com/geekychris/code_graph_search (may need to modify that project).  Should support a singular UI surface without a web browser like the go/wails combo).  That code search should be something you can launch on a project.  This should include setting up codesearch to index the project.  Make sure the code search is buildable and installable and you can install from chief (this is a recurring theme for all other tools we ant to integrate).  Make sure changes to code graph search are pushed back to the project.  Here is where the code search is https://github.com/geekychris/code_graph_search
 
 ## Attention & notifications
-- [ ] {id:535c} Per-project + global Do-Not-Disturb schedule [priority:med]
-  Config lets me set "no pokes or notifications between 22:00–08:00", globally or per project. Notifications queue silently during DND and drain on lift.
 
 ## Operations logging & analytics
-- [ ] {id:19f8} Log every daemon operation to the SQLite `events` table with structured JSON payload [priority:high]
-  Cover at minimum: task claim/complete/defer, session heartbeat, notification sent, wake-up poke, resource claim/release/renew/expire, MCP tool call (name + latency), fswatch write, backlog parse round-trip. Payload as JSON. Include ts, duration_ms, project_id, session_id, kind, outcome.
-- [ ] {id:2546} Retention policy for the events table
-  Configurable rolling window (default 90 days). On rotation, archive to gzipped JSONL under `~/Library/Logs/Chief/archive/YYYY-MM.jsonl.gz` before delete. `chief events export --since <t>` CLI to dump for external analysis (feeds later dashboards + weekly digest).
 - [ ] {id:6db5} Analytics dashboard in the Wails UI [priority:med]
   Per-project charts: task velocity (completed/week), avg time-to-complete, defer rate, top-flagged categories. Global: cross-project time distribution, wake-up-poke frequency, resource contention timeline, notification volume by urgency. Reuse chart patterns from claude-session-analyzer where sensible.
-- [ ] {id:f7de} `chief stats` CLI subcommand for terminal-friendly analytics
-  One line per project (velocity, active tasks, last activity, flags-outstanding); `--json` for scripting. Powers the weekly-digest and Telegram `/status` command.
 - [ ] {id:531e} Surface task-duration + revive-count outliers in the UI [priority:med]
   A task claimed 3+ times without completion is probably stuck — flag with a "needs human review" badge and suggest defer or split. Same treatment for tasks whose active duration crosses a per-project SLA (default 4h).
 
@@ -29,8 +24,6 @@
   Which urgency → which backend(s). Example: `urgent → telegram+macos; attention → telegram; info → macos-only`. Per-project overrides in `.chief/project.yaml`.
 
 ## Multi-project coordination
-- [ ] {id:c09c} Cross-project full-text search across all backlogs [priority:med]
-  `chief search "auth"` returns matching tasks with project + status + category. Backed by SQLite FTS5.
 - [ ] {id:ad14} Task dependencies (blocks / blocked-by) [priority:med]
   `[blocks:id:a3f1]` and `[blocked-by:id:b7c2]` tags in `backlog.md`. Parser writes them to a `task_edges` table; scheduler skips blocked tasks when choosing what to hand out; UI shows a dependency graph per project.
 - [ ] {id:e38e} Task splitting proposal flow
