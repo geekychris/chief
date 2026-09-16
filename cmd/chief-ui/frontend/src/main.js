@@ -13,6 +13,7 @@ import {
   ListFlags, CountOpenFlags, AnswerFlag,
   ApproveNextTask, SkipNextTask, SnoozeNextTask,
   NextUp, StatsDetailed,
+  CodeGraphStatus, InstallCodeGraph, OpenCodeGraph,
 } from '../wailsjs/go/main/App';
 
 // -------- state --------
@@ -86,6 +87,9 @@ const els = {
   // History-viewer block
   btnOpenHistory: $('btn-open-history'),
   pmHistoryHint: $('pm-history-hint'),
+  // Code-graph block
+  btnOpenCodeGraph: $('btn-open-codegraph'),
+  pmCodeGraphHint: $('pm-codegraph-hint'),
   // Modal: install progress
   modalInstall: $('modal-install'),
   installStatus: $('install-status'),
@@ -148,6 +152,7 @@ els.btnOpenSessionsDir.addEventListener('click', () => {
   if (currentSessions?.sessions_dir) OpenPath(currentSessions.sessions_dir);
 });
 els.btnOpenHistory.addEventListener('click', openHistoryForCurrentProject);
+els.btnOpenCodeGraph.addEventListener('click', openCodeGraphForCurrentProject);
 els.btnInstallStart.addEventListener('click', runAnalyzerInstall);
 els.btnInstallClose.addEventListener('click', () => els.modalInstall.classList.add('hidden'));
 els.btnInbox.addEventListener('click', openInbox);
@@ -778,6 +783,44 @@ async function openTraceForCurrentProject() {
 }
 
 // -------- history_viewer (jump to zsh history filtered by project dir) --------
+
+async function openCodeGraphForCurrentProject() {
+  const projectID = state.selectedProject;
+  if (!projectID) return;
+  try {
+    const status = await CodeGraphStatus();
+    if (!status.installed) {
+      const missing = [];
+      if (!status.has_java) missing.push('java 21');
+      if (!status.has_maven) missing.push('maven');
+      if (!status.has_npm) missing.push('node/npm');
+      let msg = 'code_graph_search is not installed. Install now (~2-5min: clones + mvn package)?';
+      if (missing.length) {
+        msg += `\n\nMissing prereqs: ${missing.join(', ')}. Install first via brew: brew install openjdk@21 maven node`;
+      }
+      if (!confirm(msg)) return;
+      els.pmCodeGraphHint.classList.remove('hidden');
+      els.pmCodeGraphHint.textContent = 'Installing code_graph_search (this can take a few minutes)…';
+      const r = await InstallCodeGraph();
+      if (!r.ok) {
+        els.pmCodeGraphHint.textContent = 'Install failed: ' + (r.error || 'unknown') + ' — see console for full log';
+        console.error('code_graph_search install log:\n' + r.log);
+        return;
+      }
+      els.pmCodeGraphHint.textContent = `Built ${r.jar_path} in ${Math.round(r.duration_ms / 1000)}s — launching…`;
+    } else {
+      els.pmCodeGraphHint.classList.add('hidden');
+    }
+    const open = await OpenCodeGraph(projectID);
+    els.pmCodeGraphHint.classList.remove('hidden');
+    const state = open.spawned ? 'spawned' : 'reused';
+    els.pmCodeGraphHint.textContent = `${state} on ${open.url}  (config: ${open.config_path})`;
+  } catch (e) {
+    console.error('code graph open failed', e);
+    els.pmCodeGraphHint.classList.remove('hidden');
+    els.pmCodeGraphHint.textContent = 'Open failed: ' + (e.message || e);
+  }
+}
 
 async function openHistoryForCurrentProject() {
   const projectID = state.selectedProject;

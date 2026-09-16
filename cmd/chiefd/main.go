@@ -33,6 +33,7 @@ import (
 	"github.com/geekychris/chief/internal/attention"
 	"github.com/geekychris/chief/internal/claudetrace"
 	"github.com/geekychris/chief/internal/cmux"
+	"github.com/geekychris/chief/internal/codegraphsearch"
 	"github.com/geekychris/chief/internal/config"
 	"github.com/geekychris/chief/internal/fswatch"
 	"github.com/geekychris/chief/internal/gitshim"
@@ -405,6 +406,10 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("historyviewer.install", handleHistoryViewerInstall())
 	s.Register("historyviewer.open", handleHistoryViewerOpen(mgr))
 
+	s.Register("codegraph.status", handleCodeGraphStatus())
+	s.Register("codegraph.install", handleCodeGraphInstall())
+	s.Register("codegraph.open", handleCodeGraphOpen(mgr))
+
 	// Attention pipeline: raise/list/answer/count flags + next-task actions.
 	s.Register("flag.raise", handleFlagRaise(st, att))
 	s.Register("flag.list", handleFlagList(st))
@@ -666,6 +671,87 @@ func handleAnalyzerInstall() ipc.Handler {
 		return methods.AnalyzerInstallResponse{
 			OK: r.OK, CLIPath: r.CLIPath, AppPath: r.AppPath,
 			Log: r.Log, Steps: r.Steps, DurationMS: r.DurationMS, Error: r.Error,
+		}, nil
+	}
+}
+
+// ---------- codegraph handlers ----------
+
+func handleCodeGraphStatus() ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		_, javaErr := exec.LookPath("java")
+		_, mvnErr := exec.LookPath("mvn")
+		_, npmErr := exec.LookPath("npm")
+		return methods.CodeGraphStatusResponse{
+			Installed:  codegraphsearch.IsInstalled(),
+			JarPath:    codegraphsearch.JarPath(),
+			InstallURL: codegraphsearch.RepoURL,
+			HasJava:    javaErr == nil,
+			HasMaven:   mvnErr == nil,
+			HasNpm:     npmErr == nil,
+		}, nil
+	}
+}
+
+func handleCodeGraphInstall() ipc.Handler {
+	return func(_ ipc.HandlerContext, _ json.RawMessage) (any, error) {
+		// mvn on a cold cache pulls hundreds of deps + builds the
+		// React frontend + compiles Java — allow 15 minutes.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		r := installer.InstallCodeGraphSearch(ctx)
+		return methods.CodeGraphInstallResponse{
+			OK: r.OK, JarPath: r.CLIPath,
+			Log: r.Log, Steps: r.Steps, DurationMS: r.DurationMS, Error: r.Error,
+		}, nil
+	}
+}
+
+func handleCodeGraphOpen(mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.CodeGraphOpenRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.IDOrPath == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "id_or_path required"}
+		}
+		ctx := context.Background()
+		p, err := mgr.Store.GetProject(ctx, req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		jar := codegraphsearch.JarPath()
+		if jar == "" {
+			return nil, &ipc.RPCError{
+				Code:    ipc.ErrCodeInternal,
+				Message: "code_graph_search JAR missing — run `chief codegraph install` or click the button in the UI",
+			}
+		}
+		port := codegraphsearch.PortForProject(p.Path)
+		cfgPath, err := codegraphsearch.EnsureConfig(p.Path, port)
+		if err != nil {
+			return nil, err
+		}
+		spawned := false
+		if !codegraphsearch.Alive(port) {
+			if _, err := codegraphsearch.Spawn(jar, cfgPath); err != nil {
+				return nil, err
+			}
+			spawned = true
+			// Give the server a moment to bind the port before returning
+			// so the UI's browser open doesn't race and 404.
+			deadline := time.Now().Add(15 * time.Second)
+			for !codegraphsearch.Alive(port) && time.Now().Before(deadline) {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+		_ = mgr.Store.InsertEvent(ctx, p.ID, "", "codegraph.opened", map[string]any{
+			"port": port, "spawned": spawned, "config_path": cfgPath,
+		})
+		return methods.CodeGraphOpenResponse{
+			URL: codegraphsearch.URL(port), Port: port,
+			ConfigPath: cfgPath, Spawned: spawned,
 		}, nil
 	}
 }

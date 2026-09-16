@@ -335,6 +335,40 @@ type HistoryViewerOpenResponse struct {
 	Mode      string `json:"mode"`                // "app" (native Wails window) | "web" (browser)
 }
 
+// ---------- codegraph.status / install / open ----------
+
+type CodeGraphStatusRequest struct{}
+type CodeGraphStatusResponse struct {
+	Installed  bool   `json:"installed"`
+	JarPath    string `json:"jar_path,omitempty"`
+	InstallURL string `json:"install_url"`
+	HasJava    bool   `json:"has_java"`
+	HasMaven   bool   `json:"has_maven"`
+	HasNpm     bool   `json:"has_npm"`
+}
+
+type CodeGraphInstallRequest struct{}
+type CodeGraphInstallResponse struct {
+	OK         bool     `json:"ok"`
+	JarPath    string   `json:"jar_path,omitempty"`
+	Log        string   `json:"log"`
+	Steps      []string `json:"steps"`
+	DurationMS int64    `json:"duration_ms"`
+	Error      string   `json:"error,omitempty"`
+}
+
+// CodeGraphOpenRequest launches (or reuses) code_graph_search scoped
+// to a project's dir, then returns the URL the caller should open.
+type CodeGraphOpenRequest struct {
+	IDOrPath string `json:"id_or_path"`
+}
+type CodeGraphOpenResponse struct {
+	URL        string `json:"url"`
+	Port       int    `json:"port"`
+	ConfigPath string `json:"config_path"`
+	Spawned    bool   `json:"spawned"`
+}
+
 // ---------- analyzer.install ----------
 
 // AnalyzerInstallRequest kicks off the analyzer install (clone + go build).

@@ -1,5 +1,6 @@
 # Completed
 
+- [x] {id:f06a} add support for code graph search [category:Backlog] (done 2026-09-16 04:49:55)
 - [x] {id:6db5} Analytics dashboard in the Wails UI [category:Operations logging & analytics] (done 2026-09-16 04:39:15)
 - [x] {id:04b7} Voice / phone quick-add via Telegram [category:Agentic ergonomics] (done 2026-09-16 04:39:15)
 - [x] {id:249e} Constitution linter [category:Agentic ergonomics] (done 2026-09-16 04:39:15)

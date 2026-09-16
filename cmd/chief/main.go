@@ -45,6 +45,7 @@ func main() {
 		digestCmd(),
 		outliersCmd(),
 		lintCmd(),
+		codegraphCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -928,6 +929,108 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// codegraphCmd fronts geekychris/code_graph_search: install the fat
+// JAR (clone + mvn build) and open the graph-explorer UI scoped to
+// a specific project.
+func codegraphCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "codegraph",
+		Short: "Install + launch geekychris/code_graph_search per project.",
+	}
+	cmd.AddCommand(codegraphStatusCmd(), codegraphInstallCmd(), codegraphOpenCmd())
+	return cmd
+}
+
+func codegraphStatusCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Report code_graph_search install state + prereq availability.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.CodeGraphStatusResponse
+			if err := c.Call("codegraph.status", methods.CodeGraphStatusRequest{}, &resp); err != nil {
+				return err
+			}
+			if jsonOut {
+				return jsonPrint(resp)
+			}
+			fmt.Printf("code_graph_search: installed=%v\n", resp.Installed)
+			if resp.JarPath != "" {
+				fmt.Printf("  jar: %s\n", resp.JarPath)
+			}
+			fmt.Printf("  prereqs: java=%v maven=%v npm=%v\n", resp.HasJava, resp.HasMaven, resp.HasNpm)
+			fmt.Printf("  upstream: %s\n", resp.InstallURL)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON")
+	return cmd
+}
+
+func codegraphInstallCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Clone + build code_graph_search (mvn package, ~2-5min).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.CodeGraphInstallResponse
+			if err := c.Call("codegraph.install", methods.CodeGraphInstallRequest{}, &resp); err != nil {
+				return err
+			}
+			if !resp.OK {
+				fmt.Fprintln(os.Stderr, resp.Log)
+				return fmt.Errorf("install failed: %s", resp.Error)
+			}
+			fmt.Printf("installed in %.1fs\n", float64(resp.DurationMS)/1000)
+			fmt.Printf("jar: %s\n", resp.JarPath)
+			return nil
+		},
+	}
+	return cmd
+}
+
+func codegraphOpenCmd() *cobra.Command {
+	var openBrowser bool
+	cmd := &cobra.Command{
+		Use:   "open <project>",
+		Short: "Launch (or reuse) code_graph_search scoped to a project's dir.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.CodeGraphOpenResponse
+			if err := c.Call("codegraph.open", methods.CodeGraphOpenRequest{IDOrPath: args[0]}, &resp); err != nil {
+				return err
+			}
+			fmt.Printf("URL:    %s\n", resp.URL)
+			fmt.Printf("Config: %s\n", resp.ConfigPath)
+			if resp.Spawned {
+				fmt.Println("(freshly spawned)")
+			} else {
+				fmt.Println("(reused existing instance)")
+			}
+			if openBrowser {
+				_ = exec.Command("open", resp.URL).Start()
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&openBrowser, "browser", true, "open the URL in the default browser after launching")
+	return cmd
 }
 
 // lintCmd forces a constitution sweep across every registered project

@@ -537,6 +537,54 @@ func (a *App) ReadProjectFile(projectID, filename string) (string, error) {
 	return string(b), nil
 }
 
+// CodeGraphStatus reports install state + prereq availability.
+func (a *App) CodeGraphStatus() (methods.CodeGraphStatusResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.CodeGraphStatusResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.CodeGraphStatusResponse
+	if err := c.Call("codegraph.status", methods.CodeGraphStatusRequest{}, &resp); err != nil {
+		return methods.CodeGraphStatusResponse{}, err
+	}
+	return resp, nil
+}
+
+// InstallCodeGraph clones + builds code_graph_search. Long-lived (up
+// to 15min); the UI shows a progress modal.
+func (a *App) InstallCodeGraph() (methods.CodeGraphInstallResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.CodeGraphInstallResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.CodeGraphInstallResponse
+	if err := c.Call("codegraph.install", methods.CodeGraphInstallRequest{}, &resp); err != nil {
+		return methods.CodeGraphInstallResponse{}, err
+	}
+	return resp, nil
+}
+
+// OpenCodeGraph launches (or reuses) code_graph_search for a project
+// and opens the URL in the default browser. The Wails wrapper for
+// code_graph_search itself is a separate follow-up.
+func (a *App) OpenCodeGraph(projectID string) (methods.CodeGraphOpenResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.CodeGraphOpenResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.CodeGraphOpenResponse
+	if err := c.Call("codegraph.open", methods.CodeGraphOpenRequest{IDOrPath: projectID}, &resp); err != nil {
+		return methods.CodeGraphOpenResponse{}, err
+	}
+	if resp.URL != "" {
+		_ = execOpen(resp.URL)
+	}
+	return resp, nil
+}
+
 // StatsDetailed returns the aggregated analytics payload used by the
 // dashboard modal. days=0 uses the server default (14).
 func (a *App) StatsDetailed(days int) (methods.StatsDetailedResponse, error) {
