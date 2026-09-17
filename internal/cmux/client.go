@@ -80,9 +80,64 @@ type rawLaunchCmd struct {
 	Launcher string `json:"launcher"`
 }
 
-// ListSurfaces returns all cmux surfaces on this machine.
+// workspaceListEnvelope matches `cmux workspace list --json`.
+type workspaceListEnvelope struct {
+	Workspaces []struct {
+		Ref string `json:"ref"`
+	} `json:"workspaces"`
+}
+
+// ListSurfaces returns all cmux surfaces on this machine. cmux's
+// list-panels command only enumerates panels in the CURRENTLY SELECTED
+// workspace by default; to reach amiga_mcp's Claude session when
+// chief-project-orchestrator is focused (a very common case), we fan
+// out list-panels across every workspace returned by
+// `cmux workspace list`.
 func (c *Client) ListSurfaces(ctx context.Context) ([]Surface, error) {
-	out, err := c.run(ctx, "list-panels", "--json")
+	// Enumerate workspaces first so we can query each one.
+	wsOut, err := c.run(ctx, "workspace", "list", "--json")
+	if err != nil {
+		// Fall back to a single default-workspace query — better than
+		// nothing if `workspace list` isn't available for some reason.
+		return c.listPanelsForWorkspace(ctx, "")
+	}
+	var wsEnv workspaceListEnvelope
+	if err := json.Unmarshal(wsOut, &wsEnv); err != nil {
+		return c.listPanelsForWorkspace(ctx, "")
+	}
+	if len(wsEnv.Workspaces) == 0 {
+		return c.listPanelsForWorkspace(ctx, "")
+	}
+	seen := map[string]struct{}{}
+	var all []Surface
+	for _, w := range wsEnv.Workspaces {
+		surfaces, err := c.listPanelsForWorkspace(ctx, w.Ref)
+		if err != nil {
+			// A single-workspace failure is not fatal — cmux may have
+			// stale references to closed workspaces; log-and-skip.
+			continue
+		}
+		for _, s := range surfaces {
+			if _, dup := seen[s.Ref]; dup {
+				continue
+			}
+			seen[s.Ref] = struct{}{}
+			all = append(all, s)
+		}
+	}
+	return all, nil
+}
+
+// listPanelsForWorkspace runs `cmux list-panels --json` for the given
+// workspace ref (or the current workspace when ref is ""). Extracted so
+// ListSurfaces can fan out across all workspaces AND callers with a
+// specific workspace in mind can target it directly.
+func (c *Client) listPanelsForWorkspace(ctx context.Context, workspaceRef string) ([]Surface, error) {
+	args := []string{"list-panels", "--json"}
+	if workspaceRef != "" {
+		args = append(args, "--workspace", workspaceRef)
+	}
+	out, err := c.run(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
