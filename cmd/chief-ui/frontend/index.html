@@ -71,6 +71,25 @@
 
       <div class="project-meta hidden" id="project-meta">
         <h2>Project</h2>
+        <div class="project-actions" id="project-actions">
+          <button id="btn-open-terminal"
+                  title="Open (or focus) a plain cmux shell in this project's directory. Reuses an existing shell in the project's cmux workspace when one already exists; otherwise creates one there. Not a Claude session — a regular unix prompt.">
+            Terminal
+          </button>
+          <button id="btn-open-history"
+                  title="Open the Zsh history viewer (geekychris/history_viewer) filtered to commands run inside this project's directory. First launch installs the viewer if missing.">
+            Zsh
+          </button>
+          <button id="btn-open-codegraph"
+                  title="Open code_graph_search scoped to this project. Reuses a running instance when available; otherwise spawns the app / JAR. First launch requires `chief codegraph install` (Maven build, ~2–5min).">
+            Code
+          </button>
+          <button id="btn-open-logsearch"
+                  title="Open Little Log Peep (geekychris/local_log_search) — a Splunk-style local log search app. It's a singleton (log sources are registered inside the app itself), so this doesn't scope to the project. First launch requires `chief logsearch install`.">
+            Logs
+          </button>
+          <div id="pm-action-hint" class="project-actions-hint hidden"></div>
+        </div>
         <dl>
           <dt>Path</dt><dd id="pm-path"></dd>
           <dt>State</dt><dd id="pm-state"></dd>
@@ -84,45 +103,6 @@
         <div class="doc-block">
           <h3>PROJECT.md</h3>
           <pre id="pm-project-doc" class="doc-preview">—</pre>
-        </div>
-        <div class="doc-block">
-          <div class="sessions-header">
-            <h3>Zsh history</h3>
-            <div class="sessions-actions">
-              <button id="btn-open-history" title="Jump to Zsh history viewer filtered by this project's dir">Open in History</button>
-            </div>
-          </div>
-          <div id="pm-history-hint" class="sessions-hint hidden"></div>
-        </div>
-
-        <div class="doc-block">
-          <div class="sessions-header">
-            <h3>Code graph</h3>
-            <div class="sessions-actions">
-              <button id="btn-open-codegraph" title="Launch code_graph_search scoped to this project's dir">Open code graph</button>
-            </div>
-          </div>
-          <div id="pm-codegraph-hint" class="sessions-hint hidden"></div>
-        </div>
-
-        <div class="doc-block">
-          <div class="sessions-header">
-            <h3>Log search</h3>
-            <div class="sessions-actions">
-              <button id="btn-open-logsearch" title="Launch Little Log Peep (geekychris/local_log_search) — singleton app; register log sources in-app">Open log search</button>
-            </div>
-          </div>
-          <div id="pm-logsearch-hint" class="sessions-hint hidden"></div>
-        </div>
-
-        <div class="doc-block">
-          <div class="sessions-header">
-            <h3>Terminal</h3>
-            <div class="sessions-actions">
-              <button id="btn-open-terminal" title="Open a cmux terminal (plain unix shell, not Claude) anchored at this project's cwd">Open terminal</button>
-            </div>
-          </div>
-          <div id="pm-terminal-hint" class="sessions-hint hidden"></div>
         </div>
 
         <div class="doc-block">

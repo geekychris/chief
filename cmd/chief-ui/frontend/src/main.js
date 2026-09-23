@@ -97,14 +97,17 @@ const els = {
   btnOpenSessionsDir: $('btn-open-sessions-dir'),
   // History-viewer block
   btnOpenHistory: $('btn-open-history'),
-  pmHistoryHint: $('pm-history-hint'),
-  // Code-graph block
+  // pmHistoryHint / pmCodeGraphHint / pmLogSearchHint / pmTerminalHint
+  // all point at the single shared toolbar hint element so status
+  // messages for the four action buttons appear in one place under the
+  // toolbar, not in four separate sections. See index.html #pm-action-hint.
+  pmHistoryHint: $('pm-action-hint'),
   btnOpenCodeGraph: $('btn-open-codegraph'),
-  pmCodeGraphHint: $('pm-codegraph-hint'),
+  pmCodeGraphHint: $('pm-action-hint'),
   btnOpenLogSearch: $('btn-open-logsearch'),
-  pmLogSearchHint: $('pm-logsearch-hint'),
+  pmLogSearchHint: $('pm-action-hint'),
   btnOpenTerminal: $('btn-open-terminal'),
-  pmTerminalHint: $('pm-terminal-hint'),
+  pmTerminalHint: $('pm-action-hint'),
   // Modal: install progress
   modalInstall: $('modal-install'),
   installStatus: $('install-status'),

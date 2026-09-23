@@ -357,6 +357,30 @@ button.danger:hover { background: var(--bad); color: #14141a; }
 .sessions-actions button { font-size: 11px; padding: 3px 8px; }
 .sessions-hint { color: var(--warn); font-size: 11px; margin-top: 4px; }
 .sessions-hint a { color: var(--accent-2); }
+
+/* Top-of-panel project action toolbar. Compact chips + shared status
+   line so the four external-tool buttons don't push the metadata
+   below the fold. Each button carries a full-sentence tooltip on
+   hover (see index.html title="..."). */
+.project-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 10px 0;
+}
+.project-actions button {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  min-width: 56px;
+}
+.project-actions-hint {
+  flex-basis: 100%;
+  color: var(--warn);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.project-actions-hint a { color: var(--accent-2); }
 .sessions-table { width: 100%; border-collapse: collapse; font-size: 11px; }
 .sessions-table th { text-align: left; color: var(--text-dim); font-size: 10px; text-transform: uppercase; font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .sessions-table td { padding: 4px 6px; border-bottom: 1px solid var(--border); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; vertical-align: middle; }
