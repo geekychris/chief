@@ -963,15 +963,25 @@ func handleCmuxOpenTerminal(cc *cmux.Client, mgr *project.Manager) ipc.Handler {
 		if err != nil {
 			return nil, err
 		}
-		ref, err := cc.OpenTerminal(ctx, p.Path)
+		res, err := cc.OpenTerminal(ctx, p.Path)
 		if err != nil {
 			return nil, err
 		}
+		mode := "spawned"
+		switch {
+		case res.Reused:
+			mode = "reused"
+		case res.NewWorkspace:
+			mode = "new-workspace"
+		}
 		_ = mgr.Store.InsertEvent(ctx, p.ID, "", "cmux.terminal_opened", map[string]any{
-			"surface": ref,
+			"surface": res.SurfaceRef, "workspace": res.WorkspaceRef, "mode": mode,
 		})
 		return methods.CmuxOpenTerminalResponse{
-			ProjectPath: p.Path, SurfaceRef: ref, Spawned: true,
+			ProjectPath:  p.Path,
+			SurfaceRef:   res.SurfaceRef,
+			WorkspaceRef: res.WorkspaceRef,
+			Mode:         mode,
 		}, nil
 	}
 }

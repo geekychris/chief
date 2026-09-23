@@ -304,9 +304,17 @@ created and focused.`,
 			if err := c.Call("cmux.open_terminal", methods.CmuxOpenTerminalRequest{IDOrPath: args[0]}, &resp); err != nil {
 				return err
 			}
-			fmt.Printf("terminal opened for %s\n", resp.ProjectPath)
-			if resp.SurfaceRef != "" {
-				fmt.Printf("  surface: %s\n", resp.SurfaceRef)
+			label := map[string]string{
+				"reused":        "reused existing terminal",
+				"spawned":       "spawned in project workspace",
+				"new-workspace": "created new workspace (no match)",
+			}[resp.Mode]
+			if label == "" {
+				label = resp.Mode
+			}
+			fmt.Printf("%s for %s\n", label, resp.ProjectPath)
+			if resp.SurfaceRef != "" || resp.WorkspaceRef != "" {
+				fmt.Printf("  surface=%s workspace=%s\n", resp.SurfaceRef, resp.WorkspaceRef)
 			}
 			return nil
 		},

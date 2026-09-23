@@ -80,10 +80,15 @@ type rawLaunchCmd struct {
 	Launcher string `json:"launcher"`
 }
 
-// workspaceListEnvelope matches `cmux workspace list --json`.
+// workspaceListEnvelope matches `cmux workspace list --json`. CWD is
+// used by OpenTerminal to pick the project's own workspace even when
+// no visible surface currently has a matching cwd (e.g. a workspace
+// whose Claude session died leaves the workspace itself with the right
+// current_directory).
 type workspaceListEnvelope struct {
 	Workspaces []struct {
-		Ref string `json:"ref"`
+		Ref              string `json:"ref"`
+		CurrentDirectory string `json:"current_directory"`
 	} `json:"workspaces"`
 }
 
@@ -262,56 +267,146 @@ func (c *Client) workspaceRefForSurface(ctx context.Context, surfaceRef string) 
 	return ""
 }
 
-// OpenTerminal opens a plain terminal cmux surface anchored at cwd,
-// focused, so the user lands in an interactive shell in that directory.
+// TerminalResult describes the outcome of OpenTerminal.
+type TerminalResult struct {
+	SurfaceRef   string // the terminal that was focused or created
+	WorkspaceRef string // the workspace it belongs to
+	Reused       bool   // true when we focused an existing shell instead of creating one
+	NewWorkspace bool   // true when we had to spawn a fresh workspace (project had none)
+}
+
+// OpenTerminal opens (or focuses) a plain terminal cmux surface for the
+// given project cwd. Strategy — in order of preference so users stay in
+// their existing project workspace and don't accumulate stray shells:
 //
-// Strategy:
-//   - If any existing surface's cwd matches (or is a descendant of) the
-//     target path, spawn a new terminal in that workspace (keeps related
-//     surfaces grouped in one workspace tab).
-//   - Otherwise, create a new workspace anchored at cwd. cmux's
-//     new-workspace verb spawns a terminal at the given cwd by default.
+//  1. Find a "project workspace" — one whose current_directory matches
+//     (or contains) the target path. When multiple workspaces match
+//     (common when the user has both an active editing workspace and a
+//     leftover one for the same repo), prefer the one that already
+//     hosts a live surface with the same cwd.
+//  2. Inside that workspace, look for an existing non-Claude terminal
+//     surface at the same cwd. If found, `focus-panel` it — no new
+//     shell created. This is what "reuse an existing" means.
+//  3. Otherwise, `new-surface --type terminal --workspace <ref>
+//     --working-directory <cwd> --focus true` — a fresh shell in the
+//     project's existing workspace, at the project's root.
+//  4. Only when NO workspace matches at all do we create a brand-new
+//     one via `new-workspace --cwd <path>`.
 //
-// Returns the created surface ref when known, or the empty string when
-// we couldn't parse cmux's response (open-workspace doesn't always
-// return the new surface ref cleanly).
-func (c *Client) OpenTerminal(ctx context.Context, cwd string) (string, error) {
+// The returned TerminalResult carries the surface/workspace refs plus
+// booleans so callers can render "reused existing" vs "spawned fresh"
+// in the UI without a second RPC round-trip.
+func (c *Client) OpenTerminal(ctx context.Context, cwd string) (TerminalResult, error) {
 	if cwd == "" {
-		return "", errors.New("OpenTerminal: cwd required")
-	}
-	// Look for an existing workspace containing a surface with this cwd.
-	all, err := c.ListSurfaces(ctx)
-	if err != nil {
-		// Non-fatal — fall through to new-workspace.
-		all = nil
+		return TerminalResult{}, errors.New("OpenTerminal: cwd required")
 	}
 	target := strings.TrimRight(cwd, "/")
-	var anchorSurface string
-	for _, s := range all {
+
+	// Enumerate workspaces (with cwd) and all surfaces (across every
+	// workspace) so we can score matches without a bunch of extra RPCs.
+	wsOut, err := c.run(ctx, "workspace", "list", "--json")
+	if err != nil {
+		return c.spawnFreshWorkspace(ctx, cwd)
+	}
+	var wsEnv workspaceListEnvelope
+	if err := json.Unmarshal(wsOut, &wsEnv); err != nil {
+		return c.spawnFreshWorkspace(ctx, cwd)
+	}
+	surfacesByWS := map[string][]Surface{}
+	for _, w := range wsEnv.Workspaces {
+		s, err := c.listPanelsForWorkspace(ctx, w.Ref)
+		if err != nil {
+			continue
+		}
+		surfacesByWS[w.Ref] = s
+	}
+
+	// Score each workspace: exact cwd match > prefix match, and among
+	// matches prefer one that already hosts a surface at cwd.
+	type wsScore struct {
+		ref     string
+		wsCWD   string
+		score   int
+		hasLive bool // any surface with cwd inside target
+	}
+	var candidates []wsScore
+	for _, w := range wsEnv.Workspaces {
+		wsCWDTrim := strings.TrimRight(w.CurrentDirectory, "/")
+		score := 0
+		switch {
+		case wsCWDTrim == target:
+			score = 3
+		case strings.HasPrefix(wsCWDTrim, target+"/"):
+			score = 2
+		case strings.HasPrefix(target, wsCWDTrim+"/"):
+			// Workspace cwd is an ANCESTOR of target (e.g. workspace at
+			// ~/code, project at ~/code/foo). Weakest match — better
+			// than making a new workspace but not by much.
+			score = 1
+		}
+		hasLive := false
+		for _, s := range surfacesByWS[w.Ref] {
+			if s.CWD == target || strings.HasPrefix(s.CWD, target+"/") {
+				hasLive = true
+				break
+			}
+		}
+		if score == 0 && !hasLive {
+			continue
+		}
+		if hasLive {
+			score++ // tiebreak
+		}
+		candidates = append(candidates, wsScore{ref: w.Ref, wsCWD: wsCWDTrim, score: score, hasLive: hasLive})
+	}
+	if len(candidates) == 0 {
+		return c.spawnFreshWorkspace(ctx, cwd)
+	}
+	// Pick the highest-scored workspace.
+	best := candidates[0]
+	for _, cand := range candidates[1:] {
+		if cand.score > best.score {
+			best = cand
+		}
+	}
+
+	// Reuse: focus an existing plain-terminal surface with matching cwd.
+	for _, s := range surfacesByWS[best.ref] {
+		if s.IsClaude {
+			continue // never hijack a Claude session
+		}
 		if s.CWD == target || strings.HasPrefix(s.CWD, target+"/") {
-			anchorSurface = s.Ref
+			if _, err := c.run(ctx, "focus-panel", "--panel", s.Ref, "--workspace", best.ref); err == nil {
+				return TerminalResult{
+					SurfaceRef: s.Ref, WorkspaceRef: best.ref, Reused: true,
+				}, nil
+			}
+			// Focus failed — fall through to spawn.
 			break
 		}
 	}
-	if anchorSurface != "" {
-		wsRef := c.workspaceRefForSurface(ctx, anchorSurface)
-		if wsRef != "" {
-			out, err := c.run(ctx, "new-surface",
-				"--type", "terminal",
-				"--workspace", wsRef,
-				"--working-directory", cwd,
-				"--focus", "true",
-			)
-			if err == nil {
-				return parseSurfaceRefFromOutput(string(out)), nil
-			}
-			// If new-surface fails inside the existing workspace, fall
-			// through to a fresh workspace rather than leaving the user
-			// with no shell at all.
-		}
+
+	// Spawn a fresh terminal inside the project's workspace.
+	out, err := c.run(ctx, "new-surface",
+		"--type", "terminal",
+		"--workspace", best.ref,
+		"--working-directory", cwd,
+		"--focus", "true",
+	)
+	if err != nil {
+		// As a last resort, still get the user a shell.
+		return c.spawnFreshWorkspace(ctx, cwd)
 	}
-	// Fallback: create a new workspace anchored at cwd. Named after the
-	// last path component so it's easy to spot in cmux's workspace list.
+	return TerminalResult{
+		SurfaceRef:   parseSurfaceRefFromOutput(string(out)),
+		WorkspaceRef: best.ref,
+	}, nil
+}
+
+// spawnFreshWorkspace is the last-resort fallback when no workspace can
+// be reused. `new-workspace --cwd <path>` creates one anchored at cwd
+// and spawns a shell inside it.
+func (c *Client) spawnFreshWorkspace(ctx context.Context, cwd string) (TerminalResult, error) {
 	name := lastPathComponent(cwd)
 	out, err := c.run(ctx, "new-workspace",
 		"--cwd", cwd,
@@ -319,9 +414,12 @@ func (c *Client) OpenTerminal(ctx context.Context, cwd string) (string, error) {
 		"--focus", "true",
 	)
 	if err != nil {
-		return "", err
+		return TerminalResult{}, err
 	}
-	return parseSurfaceRefFromOutput(string(out)), nil
+	return TerminalResult{
+		SurfaceRef:   parseSurfaceRefFromOutput(string(out)),
+		NewWorkspace: true,
+	}, nil
 }
 
 // parseSurfaceRefFromOutput extracts a `surface:NN` ref from cmux's

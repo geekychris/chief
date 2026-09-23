@@ -872,9 +872,15 @@ async function openTerminalForCurrentProject() {
   els.pmTerminalHint.textContent = 'Opening cmux terminal…';
   try {
     const r = await OpenTerminal(projectID);
-    const ref = r.surface_ref ? ` (${r.surface_ref})` : '';
-    els.pmTerminalHint.textContent = `terminal opened at ${r.project_path}${ref}`;
-    showToast('cmux terminal opened');
+    const label = {
+      'reused':        'reused existing terminal',
+      'spawned':       'spawned in project workspace',
+      'new-workspace': 'created new workspace (no match)',
+    }[r.mode] || r.mode;
+    const surface = r.surface_ref ? ` · ${r.surface_ref}` : '';
+    const ws = r.workspace_ref ? ` in ${r.workspace_ref}` : '';
+    els.pmTerminalHint.textContent = `${label}${ws} at ${r.project_path}${surface}`;
+    showToast(`cmux terminal: ${label}`);
   } catch (e) {
     const msg = String(e && e.message || e);
     els.pmTerminalHint.textContent = 'Open failed: ' + msg;

@@ -595,9 +595,14 @@ type CmuxOpenTerminalRequest struct {
 	IDOrPath string `json:"id_or_path"`
 }
 type CmuxOpenTerminalResponse struct {
-	ProjectPath string `json:"project_path"`
-	SurfaceRef  string `json:"surface_ref,omitempty"` // may be empty when cmux didn't return one cleanly
-	Spawned     bool   `json:"spawned"`
+	ProjectPath  string `json:"project_path"`
+	SurfaceRef   string `json:"surface_ref,omitempty"`   // may be empty when cmux didn't return one cleanly
+	WorkspaceRef string `json:"workspace_ref,omitempty"` // workspace the terminal ended up in
+	// Mode reports how the terminal was resolved:
+	//   "reused"        — focused an existing plain terminal in the project's workspace
+	//   "spawned"       — added a new terminal to the project's existing workspace
+	//   "new-workspace" — no workspace matched, so a fresh workspace was created
+	Mode string `json:"mode"`
 }
 
 // ---------- cmux.direct_send ----------
