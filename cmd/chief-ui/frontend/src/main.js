@@ -16,6 +16,7 @@ import {
   CodeGraphStatus, InstallCodeGraph, OpenCodeGraph,
   LogSearchStatus, InstallLogSearch, OpenLogSearch,
   Goto, BookmarkList, BookmarkSet,
+  OpenTerminal,
 } from '../wailsjs/go/main/App';
 
 // -------- state --------
@@ -102,6 +103,8 @@ const els = {
   pmCodeGraphHint: $('pm-codegraph-hint'),
   btnOpenLogSearch: $('btn-open-logsearch'),
   pmLogSearchHint: $('pm-logsearch-hint'),
+  btnOpenTerminal: $('btn-open-terminal'),
+  pmTerminalHint: $('pm-terminal-hint'),
   // Modal: install progress
   modalInstall: $('modal-install'),
   installStatus: $('install-status'),
@@ -168,6 +171,7 @@ els.btnOpenSessionsDir.addEventListener('click', () => {
 els.btnOpenHistory.addEventListener('click', openHistoryForCurrentProject);
 els.btnOpenCodeGraph.addEventListener('click', openCodeGraphForCurrentProject);
 els.btnOpenLogSearch.addEventListener('click', openLogSearch);
+els.btnOpenTerminal.addEventListener('click', openTerminalForCurrentProject);
 els.btnInstallStart.addEventListener('click', runAnalyzerInstall);
 els.btnInstallClose.addEventListener('click', () => els.modalInstall.classList.add('hidden'));
 els.btnInbox.addEventListener('click', openInbox);
@@ -852,6 +856,30 @@ async function openCodeGraphForCurrentProject() {
       showToast('Open failed: ' + msg, true);
     }
     console.error('code graph open failed', e);
+  }
+}
+
+// Open a plain cmux terminal at the selected project's cwd. Requires
+// a selected project — same guard as the codegraph button. This is a
+// regular unix shell, not a Claude session.
+async function openTerminalForCurrentProject() {
+  const projectID = state.selectedProject;
+  if (!projectID) {
+    showToast('No project selected — pick one first', true);
+    return;
+  }
+  els.pmTerminalHint.classList.remove('hidden');
+  els.pmTerminalHint.textContent = 'Opening cmux terminal…';
+  try {
+    const r = await OpenTerminal(projectID);
+    const ref = r.surface_ref ? ` (${r.surface_ref})` : '';
+    els.pmTerminalHint.textContent = `terminal opened at ${r.project_path}${ref}`;
+    showToast('cmux terminal opened');
+  } catch (e) {
+    const msg = String(e && e.message || e);
+    els.pmTerminalHint.textContent = 'Open failed: ' + msg;
+    showToast('Open failed: ' + msg, true);
+    console.error('open terminal failed', e);
   }
 }
 

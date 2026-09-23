@@ -556,6 +556,7 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("logsearch.open", handleLogSearchOpen(mgr))
 
 	s.Register("cmux.direct_send", handleCmuxDirectSend(cmuxClient, mgr))
+	s.Register("cmux.open_terminal", handleCmuxOpenTerminal(cmuxClient, mgr))
 	s.Register("focus.enter", handleFocusEnter(mgr, att))
 	s.Register("undo.list", handleUndoList(st))
 	s.Register("undo.restore", handleUndoRestore(st, mgr))
@@ -938,6 +939,40 @@ func handleCodeGraphOpen(mgr *project.Manager) ipc.Handler {
 			ConfigPath: cfgPath, Spawned: spawned, Mode: mode,
 		}
 		return resp, nil
+	}
+}
+
+// ---------- cmux.open_terminal handler ----------
+
+// handleCmuxOpenTerminal spawns (or reuses a workspace for) a plain
+// terminal surface in a project's cwd. Not project-scoped in the sense
+// of persisting a binding — every call spawns a fresh shell surface.
+// The user asked for a way to jump to a regular unix prompt in the
+// project's dir; this is that.
+func handleCmuxOpenTerminal(cc *cmux.Client, mgr *project.Manager) ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.CmuxOpenTerminalRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.IDOrPath == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "id_or_path required"}
+		}
+		ctx := context.Background()
+		p, err := mgr.Store.GetProject(ctx, req.IDOrPath)
+		if err != nil {
+			return nil, err
+		}
+		ref, err := cc.OpenTerminal(ctx, p.Path)
+		if err != nil {
+			return nil, err
+		}
+		_ = mgr.Store.InsertEvent(ctx, p.ID, "", "cmux.terminal_opened", map[string]any{
+			"surface": ref,
+		})
+		return methods.CmuxOpenTerminalResponse{
+			ProjectPath: p.Path, SurfaceRef: ref, Spawned: true,
+		}, nil
 	}
 }
 

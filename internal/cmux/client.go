@@ -235,6 +235,124 @@ func (c *Client) SendAndRun(ctx context.Context, surfaceRef, text string) error 
 	return c.SendKey(ctx, surfaceRef, "enter")
 }
 
+// workspaceRefForSurface finds the workspace containing surfaceRef by
+// scanning `cmux workspace list --json` for a workspace whose panels
+// include the given surface. Returns "" when no match — the caller
+// should then fall back to creating a fresh workspace.
+func (c *Client) workspaceRefForSurface(ctx context.Context, surfaceRef string) string {
+	wsOut, err := c.run(ctx, "workspace", "list", "--json")
+	if err != nil {
+		return ""
+	}
+	var env workspaceListEnvelope
+	if err := json.Unmarshal(wsOut, &env); err != nil {
+		return ""
+	}
+	for _, w := range env.Workspaces {
+		surfaces, err := c.listPanelsForWorkspace(ctx, w.Ref)
+		if err != nil {
+			continue
+		}
+		for _, s := range surfaces {
+			if s.Ref == surfaceRef {
+				return w.Ref
+			}
+		}
+	}
+	return ""
+}
+
+// OpenTerminal opens a plain terminal cmux surface anchored at cwd,
+// focused, so the user lands in an interactive shell in that directory.
+//
+// Strategy:
+//   - If any existing surface's cwd matches (or is a descendant of) the
+//     target path, spawn a new terminal in that workspace (keeps related
+//     surfaces grouped in one workspace tab).
+//   - Otherwise, create a new workspace anchored at cwd. cmux's
+//     new-workspace verb spawns a terminal at the given cwd by default.
+//
+// Returns the created surface ref when known, or the empty string when
+// we couldn't parse cmux's response (open-workspace doesn't always
+// return the new surface ref cleanly).
+func (c *Client) OpenTerminal(ctx context.Context, cwd string) (string, error) {
+	if cwd == "" {
+		return "", errors.New("OpenTerminal: cwd required")
+	}
+	// Look for an existing workspace containing a surface with this cwd.
+	all, err := c.ListSurfaces(ctx)
+	if err != nil {
+		// Non-fatal — fall through to new-workspace.
+		all = nil
+	}
+	target := strings.TrimRight(cwd, "/")
+	var anchorSurface string
+	for _, s := range all {
+		if s.CWD == target || strings.HasPrefix(s.CWD, target+"/") {
+			anchorSurface = s.Ref
+			break
+		}
+	}
+	if anchorSurface != "" {
+		wsRef := c.workspaceRefForSurface(ctx, anchorSurface)
+		if wsRef != "" {
+			out, err := c.run(ctx, "new-surface",
+				"--type", "terminal",
+				"--workspace", wsRef,
+				"--working-directory", cwd,
+				"--focus", "true",
+			)
+			if err == nil {
+				return parseSurfaceRefFromOutput(string(out)), nil
+			}
+			// If new-surface fails inside the existing workspace, fall
+			// through to a fresh workspace rather than leaving the user
+			// with no shell at all.
+		}
+	}
+	// Fallback: create a new workspace anchored at cwd. Named after the
+	// last path component so it's easy to spot in cmux's workspace list.
+	name := lastPathComponent(cwd)
+	out, err := c.run(ctx, "new-workspace",
+		"--cwd", cwd,
+		"--name", name+" (chief)",
+		"--focus", "true",
+	)
+	if err != nil {
+		return "", err
+	}
+	return parseSurfaceRefFromOutput(string(out)), nil
+}
+
+// parseSurfaceRefFromOutput extracts a `surface:NN` ref from cmux's
+// occasional plain-text output. Returns "" when nothing matches.
+func parseSurfaceRefFromOutput(s string) string {
+	// cmux prints "surface:NN" somewhere in stdout for new-surface /
+	// new-workspace. Search for the pattern.
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, "surface:"); idx >= 0 {
+			rest := line[idx+len("surface:"):]
+			end := 0
+			for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+				end++
+			}
+			if end > 0 {
+				return "surface:" + rest[:end]
+			}
+		}
+	}
+	return ""
+}
+
+func lastPathComponent(p string) string {
+	p = strings.TrimRight(p, "/")
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
 // CloseSurface asks cmux to close (terminate) the surface at surfaceRef.
 // Used by the idle-Claude killer (1b72). No-op if the surface is already
 // gone — cmux returns an error we treat as success.

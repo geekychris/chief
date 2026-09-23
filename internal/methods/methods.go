@@ -585,6 +585,21 @@ type BriefingFireResponse struct {
 	Sent bool `json:"sent"`
 }
 
+// ---------- cmux.open_terminal ----------
+
+// CmuxOpenTerminalRequest asks cmux to spawn (or focus) a plain terminal
+// surface anchored at the project's cwd — a regular unix prompt, not a
+// Claude session. Used by `chief term` + Chief.app's "Open terminal"
+// button.
+type CmuxOpenTerminalRequest struct {
+	IDOrPath string `json:"id_or_path"`
+}
+type CmuxOpenTerminalResponse struct {
+	ProjectPath string `json:"project_path"`
+	SurfaceRef  string `json:"surface_ref,omitempty"` // may be empty when cmux didn't return one cleanly
+	Spawned     bool   `json:"spawned"`
+}
+
 // ---------- cmux.direct_send ----------
 
 // CmuxDirectSendRequest injects an arbitrary prompt into a project's

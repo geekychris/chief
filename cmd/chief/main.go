@@ -59,6 +59,7 @@ func main() {
 		timeReportCmd(),
 		bookmarkCmd(),
 		gotoCmd(),
+		termCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

@@ -282,6 +282,38 @@ func timeReportCmd() *cobra.Command {
 	return cmd
 }
 
+// ---------- term (cmux terminal for a project) ----------
+
+func termCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "term <project>",
+		Short: "Open a cmux terminal (plain unix shell) anchored at a project's cwd.",
+		Long: `Spawns a fresh cmux terminal surface anchored at the project's cwd —
+a regular unix prompt, not a Claude session. If cmux already has a
+workspace containing this project's cwd, the terminal is added there
+(so related surfaces stay grouped); otherwise a fresh workspace is
+created and focused.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.CmuxOpenTerminalResponse
+			if err := c.Call("cmux.open_terminal", methods.CmuxOpenTerminalRequest{IDOrPath: args[0]}, &resp); err != nil {
+				return err
+			}
+			fmt.Printf("terminal opened for %s\n", resp.ProjectPath)
+			if resp.SurfaceRef != "" {
+				fmt.Printf("  surface: %s\n", resp.SurfaceRef)
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
 // ---------- bookmarks (8e23) ----------
 
 func bookmarkCmd() *cobra.Command {

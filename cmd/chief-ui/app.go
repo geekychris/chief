@@ -587,6 +587,22 @@ func (a *App) OpenCodeGraph(projectID string) (methods.CodeGraphOpenResponse, er
 	return resp, nil
 }
 
+// OpenTerminal asks cmux to open a plain terminal surface at the
+// project's cwd. Returns the surface ref (may be empty when cmux didn't
+// return one cleanly).
+func (a *App) OpenTerminal(projectID string) (methods.CmuxOpenTerminalResponse, error) {
+	c, err := a.dial()
+	if err != nil {
+		return methods.CmuxOpenTerminalResponse{}, err
+	}
+	defer c.Close()
+	var resp methods.CmuxOpenTerminalResponse
+	if err := c.Call("cmux.open_terminal", methods.CmuxOpenTerminalRequest{IDOrPath: projectID}, &resp); err != nil {
+		return methods.CmuxOpenTerminalResponse{}, err
+	}
+	return resp, nil
+}
+
 // Goto resolves a bookmark slot to a project and returns its id + name.
 // The frontend then calls selectProject(id) so ⌘1..⌘9 in Chief.app jumps
 // straight to a pinned project.
