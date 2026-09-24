@@ -1,5 +1,8 @@
 # Completed
 
+- [x] {id:3382} Log search has an issue with pages not being accessible [category:Backlog] (done 2026-09-23 18:44:04)
+  - added: 2026-09-23 18:39:28 · started: 2026-09-23 18:39:42 · duration: 4m
+  We changed the local log search to run inside a window like wails.  if I click on some pages of the app it can take me to a page not found and then the app does not allow me to continue.
 - [x] {id:34e5} when adding to completed include full details [category:Backlog] (done 2026-09-16 14:35:04)
   - added: 2026-09-16 14:28:07 · started: 2026-09-16 14:28:44 · duration: 6m
   When you add to the completed list you only keep the title.  Keep the full details both title and body text.  Also include when the task was initially added to the backlog, when it was started and when it was completed.  You can also keep other stats if you know anything like size of changes etc.

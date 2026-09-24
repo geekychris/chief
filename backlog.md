@@ -1,4 +1,6 @@
 ## Backlog
+- [ ] {id:ee1f} add logging to chief
+  add logging to chief and then make it so you add to the log search that chief logging.  There should be a rest interface or mcp interface to allow another app to call the logging app to add a new log to tail.
 
 ## One-shots (proposed via 40fd)
 
