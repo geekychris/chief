@@ -1,5 +1,8 @@
 # Completed
 
+- [x] {id:ee1f} add logging to chief [category:Backlog] (done 2026-09-23 18:52:00)
+  - added: 2026-09-23 18:43:57 · started: 2026-09-23 18:45:39 · duration: 6m
+  add logging to chief and then make it so you add to the log search that chief logging.  There should be a rest interface or mcp interface to allow another app to call the logging app to add a new log to tail.
 - [x] {id:3382} Log search has an issue with pages not being accessible [category:Backlog] (done 2026-09-23 18:44:04)
   - added: 2026-09-23 18:39:28 · started: 2026-09-23 18:39:42 · duration: 4m
   We changed the local log search to run inside a window like wails.  if I click on some pages of the app it can take me to a page not found and then the app does not allow me to continue.

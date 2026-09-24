@@ -554,6 +554,7 @@ func registerMethods(s *ipc.Server, st *store.Store, mgr *project.Manager, w *fs
 	s.Register("logsearch.status", handleLogSearchStatus())
 	s.Register("logsearch.install", handleLogSearchInstall())
 	s.Register("logsearch.open", handleLogSearchOpen(mgr))
+	s.Register("logsearch.link", handleLogSearchLink())
 
 	s.Register("cmux.direct_send", handleCmuxDirectSend(cmuxClient, mgr))
 	s.Register("cmux.open_terminal", handleCmuxOpenTerminal(cmuxClient, mgr))
@@ -1445,24 +1446,70 @@ func handleLogSearchOpen(mgr *project.Manager) ipc.Handler {
 				Message: "Little Log Peep.app not installed — run `chief logsearch install` first",
 			}
 		}
+		spawned := false
 		if logsearch.IsRunning() {
-			// Existing instance — focus rather than duplicate.
 			_ = logsearch.FocusRunning()
-			_ = mgr.Store.InsertEvent(context.Background(), "", "", "logsearch.opened", map[string]any{
-				"spawned": false, "app_path": logsearch.AppBundlePath(),
-			})
-			return methods.LogSearchOpenResponse{
-				AppPath: logsearch.AppBundlePath(), Spawned: false,
-			}, nil
+		} else {
+			if err := logsearch.Launch(); err != nil {
+				return nil, err
+			}
+			spawned = true
 		}
-		if err := logsearch.Launch(); err != nil {
-			return nil, err
-		}
+		// Register chiefd.log as a source in the running service so
+		// chief's own operational log shows up in the log-search UI
+		// alongside whatever else the user has attached. Best-effort:
+		// the service's port file may take a moment to appear after a
+		// fresh launch, and a version of the .app older than the port-
+		// file rollout simply won't have the file. Both cases are
+		// silent no-ops rather than errors.
+		go func() {
+			// Give a fresh launch a chance to publish its port.
+			if spawned {
+				_ = logsearch.WaitForPort(15 * time.Second)
+			}
+			if err := logsearch.RegisterChiefLog(); err != nil {
+				slog.Debug("logsearch: skip auto-register chiefd.log", "err", err)
+			} else {
+				slog.Info("logsearch: registered chiefd.log")
+			}
+		}()
 		_ = mgr.Store.InsertEvent(context.Background(), "", "", "logsearch.opened", map[string]any{
-			"spawned": true, "app_path": logsearch.AppBundlePath(),
+			"spawned": spawned, "app_path": logsearch.AppBundlePath(),
 		})
 		return methods.LogSearchOpenResponse{
-			AppPath: logsearch.AppBundlePath(), Spawned: true,
+			AppPath: logsearch.AppBundlePath(), Spawned: spawned,
+		}, nil
+	}
+}
+
+// handleLogSearchLink fronts local_log_search's /api/sources REST so
+// callers don't have to know the running port or the request shape.
+// Idempotent by ID (chief-side UpsertSource does GET-then-POST/PUT).
+func handleLogSearchLink() ipc.Handler {
+	return func(_ ipc.HandlerContext, raw json.RawMessage) (any, error) {
+		var req methods.LogSearchLinkRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: err.Error()}
+		}
+		if req.ID == "" || req.FilePath == "" {
+			return nil, &ipc.RPCError{Code: ipc.ErrCodeInvalidArgs, Message: "id and file_path required"}
+		}
+		parser := req.ParserType
+		if parser == "" {
+			parser = "json"
+		}
+		index := req.IndexName
+		if index == "" {
+			index = req.ID
+		}
+		if err := logsearch.UpsertSource(logsearch.LogSource{
+			ID: req.ID, FilePath: req.FilePath, IndexName: index,
+			ParserType: parser, ParserConfig: req.Parser, Enabled: true,
+		}); err != nil {
+			return methods.LogSearchLinkResponse{Registered: false}, err
+		}
+		return methods.LogSearchLinkResponse{
+			Registered: true, Port: logsearch.RunningPort(), IndexName: index,
 		}, nil
 	}
 }

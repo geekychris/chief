@@ -1474,7 +1474,7 @@ func logsearchCmd() *cobra.Command {
 		Use:   "logsearch",
 		Short: "Install + launch geekychris/local_log_search (Little Log Peep).",
 	}
-	cmd.AddCommand(logsearchStatusCmd(), logsearchInstallCmd(), logsearchOpenCmd())
+	cmd.AddCommand(logsearchStatusCmd(), logsearchInstallCmd(), logsearchOpenCmd(), logsearchLinkCmd())
 	return cmd
 }
 
@@ -1557,6 +1557,52 @@ func logsearchOpenCmd() *cobra.Command {
 			return nil
 		},
 	}
+	return cmd
+}
+
+// logsearchLinkCmd registers a log file with the running Little Log
+// Peep so external apps can add themselves without knowing REST or
+// the running port. Fronts the /api/sources endpoint via chiefd.
+func logsearchLinkCmd() *cobra.Command {
+	var id, indexName, parserType string
+	cmd := &cobra.Command{
+		Use:   "link <file-path>",
+		Short: "Register a log file with the running Little Log Peep (upserts by --id).",
+		Long: `Adds a log file to the running Little Log Peep instance so it
+starts tailing + indexing lines from it. Idempotent by --id: calling
+again with the same id updates the existing source.
+
+Examples:
+  chief logsearch link ~/Library/Logs/Chief/chiefd.log --id chief-daemon --index chief
+  chief logsearch link /var/log/myapp/app.log --id myapp --parser json
+  chief logsearch link /var/log/nginx/access.log --id nginx --parser regex
+
+Requires Little Log Peep to be running (spawn via ` + "`chief logsearch open`" + `).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if id == "" {
+				return fmt.Errorf("--id required (stable identifier so upsert can dedupe)")
+			}
+			c, err := dial()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			var resp methods.LogSearchLinkResponse
+			if err := c.Call("logsearch.link", methods.LogSearchLinkRequest{
+				ID: id, FilePath: args[0],
+				IndexName: indexName, ParserType: parserType,
+			}, &resp); err != nil {
+				return err
+			}
+			fmt.Printf("registered %s → index=%s (log-search port %d)\n",
+				id, resp.IndexName, resp.Port)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&id, "id", "", "stable identifier for the source (required)")
+	cmd.Flags().StringVar(&indexName, "index", "", "Lucene index name (default: --id)")
+	cmd.Flags().StringVar(&parserType, "parser", "json", "log-line parser: keyvalue|regex|grok|json|custom")
 	return cmd
 }
 

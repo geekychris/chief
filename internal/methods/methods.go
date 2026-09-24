@@ -659,6 +659,22 @@ type LogSearchInstallResponse struct {
 	Error      string   `json:"error,omitempty"`
 }
 
+// LogSearchLinkRequest registers a new log file with the running Little
+// Log Peep service so it starts tailing + indexing it. Idempotent by
+// ID — POST when new, PUT when the ID is already known.
+type LogSearchLinkRequest struct {
+	ID         string            `json:"id"`                    // stable id; caller's responsibility
+	FilePath   string            `json:"file_path"`             // absolute
+	IndexName  string            `json:"index_name,omitempty"`  // default: id
+	ParserType string            `json:"parser_type,omitempty"` // "keyvalue"|"regex"|"grok"|"json"|"custom"; default "json"
+	Parser     map[string]string `json:"parser,omitempty"`      // parser-specific config
+}
+type LogSearchLinkResponse struct {
+	Registered bool   `json:"registered"`
+	Port       int    `json:"port,omitempty"`
+	IndexName  string `json:"index_name,omitempty"`
+}
+
 // LogSearchOpenRequest launches (or focuses) Little Log Peep.
 // Log search is a singleton — users register sources once via the
 // app's own UI — so no project scoping is applied.
