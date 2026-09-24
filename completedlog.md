@@ -1,5 +1,8 @@
 # Completed
 
+- [x] {id:0fc3} i the log search tool ui is hard to read [category:Backlog] (done 2026-09-24 16:39:39)
+  - added: 2026-09-24 16:33:49 · started: 2026-09-24 16:33:59 · duration: 5m
+  In the log search (little log peep) the UI is hard to understand.  Icons are not clear.  They should have bubble help and use better icons to represent their tasks.  
 - [x] {id:ee1f} add logging to chief [category:Backlog] (done 2026-09-23 18:52:00)
   - added: 2026-09-23 18:43:57 · started: 2026-09-23 18:45:39 · duration: 6m
   add logging to chief and then make it so you add to the log search that chief logging.  There should be a rest interface or mcp interface to allow another app to call the logging app to add a new log to tail.
