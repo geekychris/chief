@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Chief logo" width="180">
+</p>
+
 # Chief
 
 Multi-project Claude Code orchestrator. Chief knows about every project you
